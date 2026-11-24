@@ -98,3 +98,36 @@ def test_recover_interrupted_marks_busy_runs_failed(tmp_path):
     p.recover_interrupted()
     run = p.store.get("r2")
     assert run.status == RunStatus.FAILED and run.failed_step == "build"
+
+
+def test_ship_requires_results_unless_early(tmp_path):
+    import pytest
+
+    from flagpilot_backend.pipeline import TransitionError
+
+    p = Pipeline(RunStore(str(tmp_path)), Settings(_env_file=None))
+    p.store.save(Run(id="r3", goal="g" * 10, repo="o/r", base_branch="main", plan=PLAN, status=RunStatus.RUNNING))
+    with pytest.raises(TransitionError, match="no results"):
+        p.ship("r3", winner="short_form")
+
+
+async def test_actions_blocked_while_a_step_runs(tmp_path):
+    import pytest
+
+    from flagpilot_backend.pipeline import TransitionError
+
+    p = Pipeline(RunStore(str(tmp_path)), Settings(_env_file=None))
+    run = Run(id="r4", goal="g" * 10, repo="o/r", base_branch="main", plan=PLAN, status=RunStatus.RUNNING)
+    p.store.save(run)
+    gate = asyncio.Event()
+
+    async def slow(run):
+        await gate.wait()
+
+    p._spawn(run, slow, "simulate")
+    assert p.store.get("r4").activity == "simulate"
+    with pytest.raises(TransitionError, match="still working"):
+        p.ship("r4", winner="short_form", early=True)
+    gate.set()
+    await asyncio.gather(*p._tasks)
+    assert p.store.get("r4").activity is None

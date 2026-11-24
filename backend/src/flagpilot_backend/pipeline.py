@@ -36,6 +36,7 @@ class Pipeline:
         self.store = store
         self.settings = settings
         self._tasks: set[asyncio.Task[None]] = set()
+        self._active: set[str] = set()  # run ids with a background step in progress
         self._flagsmith: FlagsmithAdmin | None = None
         self._github: GitHubClient | None = None
 
@@ -78,6 +79,11 @@ class Pipeline:
         return emit
 
     def _spawn(self, run: Run, step: Callable[[Run], Awaitable[None]], name: str) -> None:
+        # One background step per run at a time; otherwise two copies of the run overwrite each other.
+        self._active.add(run.id)
+        run.activity = name
+        self.store.save(run)
+
         async def wrapper() -> None:
             run.error = None
             run.failed_step = None
@@ -88,6 +94,10 @@ class Pipeline:
                 run.failed_step = name
                 run.error = f"{type(exc).__name__}: {exc}"
                 await self._emitter(run)("error", run.error)
+            finally:
+                self._active.discard(run.id)
+                run.activity = None
+                self.store.save(run)
 
         task = asyncio.create_task(wrapper())
         self._tasks.add(task)
@@ -97,6 +107,8 @@ class Pipeline:
         run = self.store.get(run_id)
         if run is None:
             raise KeyError(run_id)
+        if run_id in self._active:
+            raise TransitionError(f"FlagPilot is still working on this run ({run.activity}). Wait for it to finish.")
         if allowed and run.status not in allowed:
             raise TransitionError(f"Run is {run.status}; expected one of {[s.value for s in allowed]}.")
         return run
@@ -326,8 +338,10 @@ class Pipeline:
 
     # --- 6. ship ---------------------------------------------------------------------
 
-    def ship(self, run_id: str, *, winner: str) -> Run:
+    def ship(self, run_id: str, *, winner: str, early: bool = False) -> Run:
         run = self._load(run_id, RunStatus.SHIP_READY, RunStatus.RUNNING)
+        if not (run.results and run.results.variants) and not early:
+            raise TransitionError("There are no results yet. Analyse first, or explicitly end the experiment early.")
         assert run.plan
         valid = {"control", *(v.key for v in run.plan.variants)}
         if winner not in valid:

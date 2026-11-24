@@ -38,7 +38,7 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
 
   useEffect(() => {
     if (!run) return
-    const busy = BUSY.includes(run.status)
+    const busy = BUSY.includes(run.status) || !!run.activity
     const t = setInterval(load, busy ? 1500 : 5000)
     return () => clearInterval(t)
   }, [run, load])
@@ -59,14 +59,17 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
   if (!run) return <div className="page"><p className="muted">Loading…</p></div>
 
   const current = stepIndex(run)
-  const busy = BUSY.includes(run.status)
+  const busy = BUSY.includes(run.status) || !!run.activity
 
   return (
     <div className="page">
       <header className="page-head">
         <div className="row between">
           <h1>{run.plan?.title ?? 'Designing experiment…'}</h1>
-          <StatusPill status={run.status} />
+          <div className="row">
+            {run.activity && <span className="pill pill-busy">{run.activity}…</span>}
+            <StatusPill status={run.status} />
+          </div>
         </div>
         <p className="muted">{run.goal}</p>
         <p className="muted small mono">{run.repo} · {run.base_branch}{run.app_path ? ` · ${run.app_path}` : ''}</p>

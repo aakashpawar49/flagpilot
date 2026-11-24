@@ -99,6 +99,7 @@ class SimulateBody(BaseModel):
 
 class ShipBody(BaseModel):
     winner: str
+    early: bool = False  # end without results; the UI asks for explicit confirmation
 
 
 @app.get("/api/runs")
@@ -158,7 +159,7 @@ async def analyse(run_id: str) -> Run:
 
 @app.post("/api/runs/{run_id}/ship")
 async def ship(run_id: str, body: ShipBody) -> Run:
-    return _guard(pipeline().ship, run_id, winner=body.winner)
+    return _guard(pipeline().ship, run_id, winner=body.winner, early=body.early)
 
 
 def run() -> None:

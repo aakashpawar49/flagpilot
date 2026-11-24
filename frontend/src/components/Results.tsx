@@ -16,6 +16,9 @@ export function Results({ run, pending, act }: {
   const results = run.results
   const rec = results?.recommendation
   const canAct = run.status === 'running' || run.status === 'ship_ready'
+  const hasResults = !!results && results.variants.length > 0
+  const recommended =
+    rec?.decision === 'ship_variant' ? rec.variant_key : rec?.decision === 'keep_control' ? 'control' : null
 
   return (
     <>
@@ -91,20 +94,20 @@ export function Results({ run, pending, act }: {
         )}
       </Card>
 
-      {canAct && (
+      {canAct && hasResults && (
         <Card title="Decide and ship" tone={run.status === 'ship_ready' ? 'attention' : undefined}>
           <p className="muted small">
             Shipping completes the experiment in Flagsmith (everyone gets the chosen arm) and opens a PR that removes
-            the experiment code.
+            the experiment code. A completed experiment can't be restarted.
           </p>
           <div className="row wrap">
             {arms.map((k) => (
               <button
                 key={k}
-                className={`btn ${rec?.decision !== 'keep_running' && (rec?.variant_key === k || (rec?.decision === 'keep_control' && k === 'control')) ? 'btn-primary' : 'btn-ghost'}`}
+                className={`btn ${recommended === k ? 'btn-primary' : 'btn-ghost'}`}
                 disabled={pending}
                 onClick={() => {
-                  if (confirm(`Ship "${k}" to everyone and end the experiment?`)) act(() => api.ship(run.id, k))
+                  if (confirm(`Ship "${k}" to everyone and end the experiment? This can't be undone.`)) act(() => api.ship(run.id, k))
                 }}
               >
                 Ship {k}
@@ -112,6 +115,33 @@ export function Results({ run, pending, act }: {
             ))}
           </div>
         </Card>
+      )}
+
+      {canAct && !hasResults && (
+        <details className="card danger-zone">
+          <summary>End the experiment early (no results yet)</summary>
+          <div className="card-body">
+            <p className="muted small">
+              Only do this to abandon the test. Without results there's no evidence for either arm, and a completed
+              experiment can't be restarted.
+            </p>
+            <div className="row wrap">
+              {arms.map((k) => (
+                <button
+                  key={k}
+                  className="btn btn-ghost"
+                  disabled={pending}
+                  onClick={() => {
+                    const typed = prompt(`There are no results yet. Type END to finish the experiment and ship "${k}".`)
+                    if (typed === 'END') act(() => api.ship(run.id, k, true))
+                  }}
+                >
+                  End early and ship {k}
+                </button>
+              ))}
+            </div>
+          </div>
+        </details>
       )}
 
       {canAct && (

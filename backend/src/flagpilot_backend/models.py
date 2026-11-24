@@ -142,3 +142,4 @@ class Run(BaseModel):
     events: list[AgentEvent] = []
     error: str | None = None
     failed_step: str | None = None  # which step to resume on retry
+    activity: str | None = None  # background step in progress, if any

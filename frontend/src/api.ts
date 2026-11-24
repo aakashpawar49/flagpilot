@@ -91,6 +91,7 @@ export interface Run {
   events: AgentEvent[]
   error: string | null
   failed_step: string | null
+  activity: string | null
   ship_choice: string | null
 }
 
@@ -132,7 +133,7 @@ export const api = {
   simulate: (id: string, visitors: number, rates: Record<string, number>) =>
     call<Run>('POST', `/runs/${id}/simulate`, { visitors, rates }),
   analyse: (id: string) => call<Run>('POST', `/runs/${id}/analyse`),
-  ship: (id: string, winner: string) => call<Run>('POST', `/runs/${id}/ship`, { winner }),
+  ship: (id: string, winner: string, early = false) => call<Run>('POST', `/runs/${id}/ship`, { winner, early }),
 }
 
 export const BUSY: RunStatus[] = ['planning', 'provisioning', 'coding', 'launching', 'analysing', 'shipping']
