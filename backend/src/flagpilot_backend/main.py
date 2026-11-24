@@ -66,7 +66,8 @@ async def status() -> dict[str, Any]:
             "ok": True,
             "environment": env.get("name"),
             "project_id": p.flagsmith.project_id,
-            "warehouse_connected": any(w.get("status") == "connected" for w in warehouses),
+            # "pending_connection" is normal until the first event arrives.
+            "warehouse_status": warehouses[0].get("status", "unknown") if warehouses else "missing",
             "warehouses": [{"type": w.get("warehouse_type"), "status": w.get("status")} for w in warehouses],
         }
     except (FlagsmithError, ValueError) as exc:

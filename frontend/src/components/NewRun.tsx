@@ -100,10 +100,12 @@ export function NewRun({ status, onCreated }: { status: Status | null; onCreated
                 : `— ${status.flagsmith.error}`}
             </li>
             {status.flagsmith.ok && (
-              <li className={status.flagsmith.warehouse_connected ? 'ok' : 'warn'}>
-                {status.flagsmith.warehouse_connected
-                  ? 'Experimentation warehouse connected'
-                  : 'No warehouse connected — enable it in Environment Settings › Warehouse so events are stored'}
+              <li className={status.flagsmith.warehouse_status === 'missing' ? 'warn' : 'ok'}>
+                {status.flagsmith.warehouse_status === 'missing'
+                  ? 'No warehouse — enable it in Environment Settings › Warehouse so events are stored'
+                  : status.flagsmith.warehouse_status === 'pending_connection'
+                    ? 'Experimentation warehouse enabled (connects when the first event arrives)'
+                    : `Experimentation warehouse ${status.flagsmith.warehouse_status}`}
               </li>
             )}
             <li className={status.github.ok ? 'ok' : 'bad'}>
