@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { createAccount } from './api'
 import { useFlagsmith } from '@flagsmith/flagsmith/react'
 
-type Props = { onSuccess: (firstName: string); variant: string }
+type Props = { onSuccess: (firstName: string) => void; variant: string }
 
 export function SignupForm({ onSuccess, variant }: Props) {
   const [submitting, setSubmitting] = useState(false)
