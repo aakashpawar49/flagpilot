@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useExperiment, useFlagsmith } from '@flagsmith/flagsmith/react'
+import { useExperiment, useFlagsmith, useFlagsmithLoading } from '@flagsmith/flagsmith/react'
 import { createAccount } from './api'
 
 type Props = { onSuccess: (firstName: string) => void }
@@ -9,8 +9,11 @@ export function SignupForm({ onSuccess }: Props) {
   const [error, setError] = useState<string | null>(null)
   const experiment = useExperiment('signup_form_variant')
   const flagsmith = useFlagsmith()
+  const loading = useFlagsmithLoading()
 
   const variant = experiment?.value ?? 'control'
+  // Render nothing until flags load so no visitor sees one form and then the other.
+  const flagsReady = !loading?.isLoading
 
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault()
@@ -28,6 +31,8 @@ export function SignupForm({ onSuccess }: Props) {
     }
   }
 
+  if (!flagsReady) return <p className="muted">Loading…</p>
+
   return (
     <form className="form" onSubmit={handleSubmit}>
       <h2>Create your account</h2>
@@ -41,11 +46,6 @@ export function SignupForm({ onSuccess }: Props) {
         Work email
         <input name="email" type="email" autoComplete="email" required />
       </label>
-      <label>
-        Password
-        <input name="password" type="password" autoComplete="new-password" minLength={8} required />
-      </label>
-
       {variant === 'control' && (
         <>
           <label>
@@ -75,6 +75,10 @@ export function SignupForm({ onSuccess }: Props) {
           </label>
         </>
       )}
+      <label>
+        Password
+        <input name="password" type="password" autoComplete="new-password" minLength={8} required />
+      </label>
 
       {error && <p className="error">{error}</p>}
       <button type="submit" disabled={submitting}>
