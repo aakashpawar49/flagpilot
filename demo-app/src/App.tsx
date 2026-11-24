@@ -1,8 +1,12 @@
 import { useState } from 'react'
 import { SignupForm } from './SignupForm'
+import { useExperiment, useFlagsmithLoading } from '@flagsmith/flagsmith/react'
 
 export default function App() {
   const [signedUp, setSignedUp] = useState<string | null>(null)
+  const loading = useFlagsmithLoading()
+  const experimentFlag = useExperiment('signup_form_experiment')
+  const variant = (experimentFlag?.value as string | undefined) ?? 'control'
 
   return (
     <div className="page">
@@ -36,8 +40,13 @@ export default function App() {
               <h2>Welcome to Lumen, {signedUp}.</h2>
               <p>Check your inbox to connect your first integration.</p>
             </div>
+          ) : loading?.isLoading ? (
+            <div className="form">
+              <h2>Create your account</h2>
+              <p className="muted">Loading signup experience...</p>
+            </div>
           ) : (
-            <SignupForm onSuccess={setSignedUp} />
+            <SignupForm onSuccess={setSignedUp} variant={variant} />
           )}
         </section>
       </main>
