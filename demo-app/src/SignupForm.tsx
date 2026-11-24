@@ -1,11 +1,13 @@
 import { useState } from 'react'
 import { createAccount } from './api'
+import { useFlagsmith } from '@flagsmith/flagsmith/react'
 
-type Props = { onSuccess: (firstName: string) => void }
+type Props = { onSuccess: (firstName: string); variant: string }
 
-export function SignupForm({ onSuccess }: Props) {
+export function SignupForm({ onSuccess, variant }: Props) {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const flagsmith = useFlagsmith()
 
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault()
@@ -14,12 +16,41 @@ export function SignupForm({ onSuccess }: Props) {
     setError(null)
     try {
       await createAccount(data)
-      onSuccess(data.fullName.split(' ')[0])
+      flagsmith.trackEvent('signup_completed')
+      const nameToDisplay = data.fullName ? data.fullName.split(' ')[0] : (data.email ? data.email.split('@')[0] : 'User')
+      onSuccess(nameToDisplay)
     } catch (err) {
       setError((err as Error).message)
     } finally {
       setSubmitting(false)
     }
+  }
+
+  if (variant === 'three_field') {
+    return (
+      <form className="form" onSubmit={handleSubmit}>
+        <h2>Create your account</h2>
+        <p className="muted">Free for teams up to 10. No credit card.</p>
+
+        <label>
+          Full name
+          <input name="fullName" autoComplete="name" required />
+        </label>
+        <label>
+          Work email
+          <input name="email" type="email" autoComplete="email" required />
+        </label>
+        <label>
+          Password
+          <input name="password" type="password" autoComplete="new-password" minLength={8} required />
+        </label>
+
+        {error && <p className="error">{error}</p>}
+        <button type="submit" disabled={submitting}>
+          {submitting ? 'Creating account…' : 'Create account'}
+        </button>
+      </form>
+    )
   }
 
   return (
