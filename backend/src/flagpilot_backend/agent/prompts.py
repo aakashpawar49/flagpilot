@@ -31,7 +31,7 @@ flagsmith.trackEvent('purchase_completed');                  // conversion
 ### React (same package, '@flagsmith/flagsmith/react')
 ```tsx
 import flagsmith from '@flagsmith/flagsmith';
-import { FlagsmithProvider, useExperiment, useFlagsmith } from '@flagsmith/flagsmith/react';
+import { FlagsmithProvider, useExperiment, useFlagsmith, useFlagsmithLoading } from '@flagsmith/flagsmith/react';
 
 <FlagsmithProvider flagsmith={flagsmith}
   options={{ environmentID: import.meta.env.VITE_FLAGSMITH_ENVIRONMENT_ID, identity: visitorId, enableEvents: true }}>
@@ -42,6 +42,8 @@ const flag = useExperiment('checkout_button');   // null until flags load; recor
 const variant = (flag?.value as string | undefined) ?? 'control';
 const fs = useFlagsmith();
 fs.trackEvent('purchase_completed');
+const loading = useFlagsmithLoading();          // { isLoading, isFetching, error, source }
+if (loading?.isLoading) return <Placeholder />;  // avoid flashing the wrong variant
 ```
 
 ### Python (flagsmith >= 6.3.0)
@@ -100,7 +102,11 @@ CODER_SYSTEM = f"""You are FlagPilot's implementation engineer. You receive an a
 plan and the current contents of the relevant files. Implement it with the
 smallest correct change:
 - Put the experience for control and each variant behind the experiment flag.
-  Control must keep today's behaviour exactly.
+  Control must keep today's behaviour exactly: same elements, same ORDER, same
+  text. Wrap the parts that differ in place instead of moving them.
+- Don't render either variant until flags have loaded (in React, check
+  useFlagsmithLoading().isLoading and show a neutral placeholder), so no visitor
+  sees control first and then their variant.
 - Make sure Flagsmith is initialised once with enableEvents: true and that the
   visitor is identified with a stable id before the flag is read.
 - Fire the metric's event exactly where success happens.
@@ -109,7 +115,7 @@ smallest correct change:
   dependencies.
 - Each change replaces a whole file: give the COMPLETE new file content, never a
   fragment or a diff. Only include files you actually change or create.
-- Paths are full repository paths exactly as shown.
+- Paths are full repository paths exactly as shown. End every file with a newline.
 
 Also write a pull-request title and a Markdown body with these sections:
 Experiment, What changed, How to verify, Rollout. The body is read by the
