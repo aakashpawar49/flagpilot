@@ -94,7 +94,7 @@ export interface Run {
 
 export interface Status {
   model: string
-  anthropic: boolean
+  llm: boolean
   defaults: { repo: string; base_branch: string; app_path: string }
   flagsmith: { ok: boolean; error?: string; environment?: string; project_id?: number; warehouse_connected?: boolean }
   github: { ok: boolean; error?: string; login?: string }

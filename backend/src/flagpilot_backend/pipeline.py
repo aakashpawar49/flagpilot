@@ -17,7 +17,7 @@ from .agent.agents import (
     implement_experiment,
     plan_experiment,
 )
-from .agent.repo_tools import RepoWorkspace
+from .agent.repo import RepoReader
 from .config import Settings
 from .flagsmith_admin import FlagsmithAdmin
 from .github_client import GitHubClient
@@ -98,8 +98,8 @@ class Pipeline:
             raise TransitionError(f"Run is {run.status}; expected one of {[s.value for s in allowed]}.")
         return run
 
-    def _workspace(self, run: Run, ref: str | None = None) -> RepoWorkspace:
-        return RepoWorkspace(self.github, run.repo, ref or run.base_branch, run.app_path)
+    def _reader(self, run: Run, ref: str | None = None) -> RepoReader:
+        return RepoReader(self.github, run.repo, ref or run.base_branch, run.app_path)
 
     # --- 1. plan -----------------------------------------------------------------
 
@@ -112,9 +112,7 @@ class Pipeline:
     async def _plan(self, run: Run) -> None:
         emit = self._emitter(run)
         await emit("info", f"Reading {run.repo} and the Flagsmith project to design an experiment.")
-        run.plan = await plan_experiment(
-            goal=run.goal, workspace=self._workspace(run), flagsmith=self.flagsmith, emit=emit
-        )
+        run.plan = await plan_experiment(goal=run.goal, reader=self._reader(run), flagsmith=self.flagsmith, emit=emit)
         run.status = RunStatus.PLAN_READY
         await emit(
             "approval",
@@ -190,9 +188,11 @@ class Pipeline:
 
         run.status = RunStatus.CODING
         await emit("info", "Writing the code change for each variant.")
-        changes, title, body = await implement_experiment(plan=plan, workspace=self._workspace(run), emit=emit)
-        run.file_changes = changes
-        run.launch_pr = await self._open_pr(run, f"flagpilot/{plan.flag_name}", changes, title, body)
+        code = await implement_experiment(plan=plan, reader=self._reader(run), emit=emit)
+        run.file_changes = code.changes
+        run.launch_pr = await self._open_pr(
+            run, f"flagpilot/{plan.flag_name}", code.changes, code.pr_title, code.pr_body
+        )
         run.status = RunStatus.PR_OPEN
         await emit(
             "approval",
@@ -293,7 +293,9 @@ class Pipeline:
                 await emit("info", "Flagsmith hasn't computed results yet. Try again in a few minutes.")
                 return
             await emit("info", "Reading the numbers.")
-            snapshot.recommendation = await analyse_results(plan=run.plan, snapshot=snapshot, exposures=exposures)
+            snapshot.recommendation = await analyse_results(
+                plan=run.plan, snapshot=snapshot, exposures=exposures, emit=emit
+            )
             run.results = snapshot
             rec = snapshot.recommendation
             if rec.decision == "keep_running":
@@ -329,11 +331,15 @@ class Pipeline:
                 )
             await emit("success", f"Experiment completed in Flagsmith. Everyone now gets `{winner}`.")
             await emit("info", "Removing the experiment code so the flag can be retired.")
-            changes, title, body = await cleanup_experiment(
-                plan=run.plan, winner_key=winner, workspace=self._workspace(run), emit=emit
+            code = await cleanup_experiment(
+                plan=run.plan,
+                winner_key=winner,
+                reader=self._reader(run),
+                paths=[c.path for c in run.file_changes if c.content is not None],
+                emit=emit,
             )
             run.ship_pr = await self._open_pr(
-                run, f"flagpilot/{_slug(run.plan.flag_name)}-cleanup", changes, title, body
+                run, f"flagpilot/{_slug(run.plan.flag_name)}-cleanup", code.changes, code.pr_title, code.pr_body
             )
             run.shipped = winner
             run.status = RunStatus.SHIPPED

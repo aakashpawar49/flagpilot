@@ -8,9 +8,14 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    # Claude
-    anthropic_api_key: str = ""
-    anthropic_model: str = "claude-opus-5-5"
+    # LLM: any OpenAI-compatible chat completions endpoint. Defaults to Google
+    # Gemini's free tier (key from https://aistudio.google.com). Groq, OpenRouter
+    # and local Ollama work by changing these three values.
+    llm_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai/"
+    llm_api_key: str = ""
+    llm_model: str = "gemini-flash-latest"
+    # Upper bound on repository text sent to the model in one request.
+    llm_max_context_chars: int = 120_000
 
     # Flagsmith Admin API. The admin key is an Organisation API key
     # (Organisation Settings > API Keys). It never leaves the backend.

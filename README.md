@@ -46,14 +46,14 @@ The agent only ever reads during its reasoning loop. Every write to Flagsmith or
 ## Repository layout
 
 ```
-backend/    FastAPI service, the agent (Claude tool-use loop), Flagsmith and GitHub clients
+backend/    FastAPI service, the agent steps (LLM with structured JSON output), Flagsmith and GitHub clients
 frontend/   React + TypeScript dashboard: plan review, approvals, results, agent log
 demo-app/   "Lumen", a sample signup page that FlagPilot experiments on
 ```
 
 ## Setup
 
-Requirements: Python 3.12 with [uv](https://docs.astral.sh/uv/), Node.js 20+, a Flagsmith account, an Anthropic API key, and a GitHub fine-grained token.
+Requirements: Python 3.12 with [uv](https://docs.astral.sh/uv/), Node.js 20+, a Flagsmith account, a free Google Gemini API key (or any OpenAI-compatible model API), and a GitHub fine-grained token.
 
 ### 1. Flagsmith
 
@@ -62,11 +62,17 @@ Requirements: Python 3.12 with [uv](https://docs.astral.sh/uv/), Node.js 20+, a 
 3. Copy the environment's **client-side key** (Environment Settings › Keys).
 4. Create an **Organisation API key** (Organisation Settings › API Keys). This admin key stays on the backend.
 
-### 2. GitHub
+### 2. AI model
+
+Get a free Gemini API key at [aistudio.google.com/apikey](https://aistudio.google.com/apikey) (no credit card). FlagPilot talks to any OpenAI-compatible API, so Groq, OpenRouter or a local Ollama model also work: see `backend/.env.example`.
+
+Each AI step is a single structured request, so a full experiment (plan, code, analysis, cleanup) needs about five requests and fits comfortably in free-tier limits.
+
+### 3. GitHub
 
 Create a fine-grained personal access token with **Contents** and **Pull requests** read/write access to the repository FlagPilot will change (for the demo, this repository).
 
-### 3. Backend
+### 4. Backend
 
 ```bash
 cd backend
@@ -75,7 +81,7 @@ uv sync
 uv run uvicorn flagpilot_backend.main:app --reload --port 8000
 ```
 
-### 4. Frontend
+### 5. Frontend
 
 ```bash
 cd frontend
@@ -83,7 +89,7 @@ npm install
 npm run dev              # http://localhost:5173
 ```
 
-### 5. Demo app (optional, to see the variants live)
+### 6. Demo app (optional, to see the variants live)
 
 ```bash
 cd demo-app
@@ -109,7 +115,7 @@ cd backend && uv run pytest
 
 ## Tech
 
-- Claude (`claude-opus-5-5`) through the Anthropic Python SDK: a tool-use loop for planning and coding, and structured outputs for analysis
+- Any OpenAI-compatible LLM (default: Google Gemini free tier) through the `openai` Python SDK, with schema-validated JSON output and self-correction
 - FastAPI, httpx, SQLite
 - Flagsmith Admin API, Flagsmith JS SDK and Python SDK (Experimentation)
 - React 19, TypeScript, Vite

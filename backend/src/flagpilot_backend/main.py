@@ -48,8 +48,8 @@ def _guard(fn, *args, **kwargs) -> Any:
 async def status() -> dict[str, Any]:
     """What's configured, so the UI can walk a new user through setup."""
     out: dict[str, Any] = {
-        "model": settings.anthropic_model,
-        "anthropic": bool(settings.anthropic_api_key),
+        "model": settings.llm_model,
+        "llm": bool(settings.llm_api_key),
         "defaults": {
             "repo": settings.default_repo,
             "base_branch": settings.default_base_branch,

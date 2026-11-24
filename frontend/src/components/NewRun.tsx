@@ -23,7 +23,7 @@ export function NewRun({ status, onCreated }: { status: Status | null; onCreated
     setAppPath((p) => p || status.defaults.app_path)
   }, [status])
 
-  const ready = status?.anthropic && status.flagsmith.ok && status.github.ok
+  const ready = status?.llm && status.flagsmith.ok && status.github.ok
 
   async function submit(e: React.FormEvent) {
     e.preventDefault()
@@ -90,8 +90,8 @@ export function NewRun({ status, onCreated }: { status: Status | null; onCreated
           <p className="muted">Checking backend…</p>
         ) : (
           <ul className="checklist">
-            <li className={status.anthropic ? 'ok' : 'bad'}>
-              Claude ({status.model}) {status.anthropic ? 'connected' : '— set ANTHROPIC_API_KEY'}
+            <li className={status.llm ? 'ok' : 'bad'}>
+              AI model ({status.model}) {status.llm ? 'configured' : '— set LLM_API_KEY'}
             </li>
             <li className={status.flagsmith.ok ? 'ok' : 'bad'}>
               Flagsmith{' '}

@@ -1,141 +1,147 @@
-"""The three FlagPilot agents: planner, coder (launch and cleanup), analyst."""
+"""FlagPilot's AI steps: select context, plan, implement, clean up, analyse.
+
+Each step is one structured LLM call (plus self-correction if the output is
+invalid), so a whole experiment needs about five requests. That keeps it inside
+free-tier quotas. None of these steps write anywhere: the pipeline applies their
+output only after a human approves.
+"""
 
 import json
 from typing import Any
 
-from pydantic import ValidationError
+from pydantic import BaseModel, Field
 
+from ..config import get_settings
 from ..flagsmith_admin import FlagsmithAdmin
 from ..models import ExperimentPlan, FileChange, Recommendation, ResultsSnapshot
 from . import prompts
-from .loop import Emit, Tool, ToolInputError, run_agent, run_structured
-from .repo_tools import RepoWorkspace
+from .llm import Emit, complete_json
+from .repo import RepoReader, render_files, render_tree
 
 
-async def plan_experiment(
-    *, goal: str, workspace: RepoWorkspace, flagsmith: FlagsmithAdmin, emit: Emit
-) -> ExperimentPlan:
-    existing_flags: set[str] = set()
+class FileSelection(BaseModel):
+    files: list[str] = Field(description="Repository paths to read, most important first. At most 15.")
 
-    async def list_flagsmith_flags(_: dict) -> str:
-        features = await flagsmith.list_features()
-        existing_flags.update(f["name"] for f in features)
-        if not features:
-            return "The project has no flags yet."
-        return "\n".join(f"- {f['name']} ({f.get('type', '?')})" for f in features)
 
-    async def list_flagsmith_metrics(_: dict) -> str:
-        metrics = await flagsmith.list_metrics()
-        if not metrics:
-            return "No experiment metrics exist yet."
-        return "\n".join(
-            f"- {m['name']}: event={m['definition'].get('event')} aggregation={m['aggregation']} direction={m['direction']}"
-            for m in metrics
+class CodeChanges(BaseModel):
+    changes: list[FileChange] = Field(min_length=1)
+    pr_title: str
+    pr_body: str
+
+
+async def _gather_context(goal: str, reader: RepoReader, emit: Emit) -> tuple[dict[str, int], dict[str, str]]:
+    """Small repos are sent whole; larger ones go through a file-selection call first."""
+    budget = get_settings().llm_max_context_chars
+    files = await reader.files()
+    if not files:
+        raise ValueError(f"No source files found in {reader.repo}/{reader.app_path or ''} on {reader.ref}.")
+    if sum(files.values()) <= budget:
+        paths = list(files)
+    else:
+        await emit("info", f"Repository has {len(files)} files; asking the model which ones matter.")
+
+        async def check(sel: FileSelection) -> str | None:
+            unknown = [p for p in sel.files if p not in files]
+            return f"These paths are not in the tree: {unknown}" if unknown else None
+
+        selection = await complete_json(
+            system=prompts.FILE_SELECTOR_SYSTEM,
+            user=f"What the developer wants to test:\n{goal}\n\nFile tree:\n{render_tree(files)}",
+            output=FileSelection,
+            emit=emit,
+            check=check,
         )
+        paths = [*reader.entry_files(), *selection.files[:15]]
+    contents = await reader.read_many(paths, budget)
+    await emit("tool", f"Read {len(contents)} files", {"input": {"files": list(contents)}})
+    return files, contents
 
-    async def submit_plan(inp: dict) -> str:
-        try:
-            plan = ExperimentPlan.model_validate(inp)
-        except ValidationError as exc:
-            raise ToolInputError(f"Plan is invalid: {exc}") from exc
+
+async def plan_experiment(*, goal: str, reader: RepoReader, flagsmith: FlagsmithAdmin, emit: Emit) -> ExperimentPlan:
+    files, contents = await _gather_context(goal, reader, emit)
+    features = await flagsmith.list_features()
+    metrics = await flagsmith.list_metrics()
+    existing_flags = {f["name"] for f in features}
+    await emit("tool", "Checked Flagsmith project", {"input": {"flags": len(features), "metrics": len(metrics)}})
+
+    async def check(plan: ExperimentPlan) -> str | None:
         if plan.control.key != "control" or plan.control.value != "control":
-            raise ToolInputError("control.key and control.value must both be 'control'.")
+            return "control.key and control.value must both be 'control'."
         keys = [v.key for v in plan.variants]
         if "control" in keys or len(set(keys)) != len(keys):
-            raise ToolInputError("Variant keys must be unique and must not be 'control'.")
+            return "Variant keys must be unique and must not be 'control'."
         if any(v.value != v.key for v in plan.variants):
-            raise ToolInputError("Each variant's value must equal its key.")
-        if not existing_flags:
-            existing_flags.update(f["name"] for f in await flagsmith.list_features())
+            return "Each variant's value must equal its key."
         if plan.flag_name in existing_flags:
-            raise ToolInputError(f"A flag named {plan.flag_name} already exists. Pick another name.")
-        return "Plan submitted for human review."
+            return f"A flag named {plan.flag_name} already exists. Pick another name."
+        return None
 
-    tools = [
-        *workspace.read_tools(),
-        Tool(
-            name="list_flagsmith_flags",
-            description="List flags that already exist in the Flagsmith project.",
-            input_schema={"type": "object", "properties": {}},
-            handler=list_flagsmith_flags,
-        ),
-        Tool(
-            name="list_flagsmith_metrics",
-            description="List experiment metrics already defined in the Flagsmith environment.",
-            input_schema={"type": "object", "properties": {}},
-            handler=list_flagsmith_metrics,
-        ),
-        Tool(
-            name="submit_plan",
-            description="Submit the experiment plan for human approval. Ends planning.",
-            input_schema=ExperimentPlan.model_json_schema(),
-            handler=submit_plan,
-            terminal=True,
-        ),
-    ]
-    user = (
-        f"Repository: {workspace.repo} (branch {workspace.ref})"
-        + (f", app lives under {workspace.app_path}" if workspace.app_path else "")
-        + f"\n\nWhat the developer wants to test:\n{goal}"
+    flags_text = "\n".join(f"- {f['name']}" for f in features) or "(none)"
+    metrics_text = (
+        "\n".join(
+            f"- {m['name']}: event={m['definition'].get('event')} aggregation={m['aggregation']}" for m in metrics
+        )
+        or "(none)"
     )
-    result = await run_agent(system=prompts.PLANNER_SYSTEM, user=user, tools=tools, emit=emit, effort="high")
-    return ExperimentPlan.model_validate(result)
-
-
-async def _run_coder(
-    *, system: str, user: str, workspace: RepoWorkspace, emit: Emit
-) -> tuple[list[FileChange], str, str]:
-    async def finish(inp: dict) -> str:
-        if not workspace.staged:
-            raise ToolInputError("No files changed yet. Use write_file before finishing.")
-        if not inp.get("pr_title") or not inp.get("pr_body"):
-            raise ToolInputError("pr_title and pr_body are required.")
-        return "Changes submitted."
-
-    tools = [
-        *workspace.read_tools(),
-        *workspace.write_tools(),
-        Tool(
-            name="finish",
-            description="Submit the staged changes as a pull request for human review.",
-            input_schema={
-                "type": "object",
-                "properties": {"pr_title": {"type": "string"}, "pr_body": {"type": "string"}},
-                "required": ["pr_title", "pr_body"],
-            },
-            handler=finish,
-            terminal=True,
-        ),
-    ]
-    result = await run_agent(system=system, user=user, tools=tools, emit=emit, effort="high", max_turns=40)
-    return list(workspace.staged.values()), result["pr_title"], result["pr_body"]
-
-
-async def implement_experiment(
-    *, plan: ExperimentPlan, workspace: RepoWorkspace, emit: Emit
-) -> tuple[list[FileChange], str, str]:
     user = (
-        f"Repository: {workspace.repo} (branch {workspace.ref})\n"
-        "Implement this approved experiment plan. The flag, its variants and the metric "
-        "already exist in Flagsmith with exactly these names.\n\n"
-        f"```json\n{plan.model_dump_json(indent=2)}\n```"
+        f"What the developer wants to test:\n{goal}\n\n"
+        f"Repository: {reader.repo} (branch {reader.ref})"
+        + (f", app under {reader.app_path}" if reader.app_path else "")
+        + f"\n\nFlags already in Flagsmith:\n{flags_text}\n\nExperiment metrics already defined:\n{metrics_text}"
+        + f"\n\nFile tree:\n{render_tree(files)}\n\nFile contents:\n{render_files(contents)}"
     )
-    return await _run_coder(system=prompts.CODER_SYSTEM, user=user, workspace=workspace, emit=emit)
+    await emit("info", "Designing the experiment.")
+    return await complete_json(system=prompts.PLANNER_SYSTEM, user=user, output=ExperimentPlan, emit=emit, check=check)
+
+
+async def _write_code(*, system: str, task: str, reader: RepoReader, paths: list[str], emit: Emit) -> CodeChanges:
+    files = await reader.files()
+    contents = await reader.read_many([*paths, *reader.entry_files()], get_settings().llm_max_context_chars)
+    await emit("tool", f"Read {len(contents)} files", {"input": {"files": list(contents)}})
+
+    async def check(out: CodeChanges) -> str | None:
+        for change in out.changes:
+            if ".." in change.path.split("/") or change.path.startswith("/"):
+                return f"{change.path}: paths must be repository-relative."
+            if change.content is None and change.path not in files:
+                return f"{change.path}: cannot delete a file that doesn't exist."
+            if change.content is not None and not change.content.strip():
+                return f"{change.path}: content is empty. Give the complete file or null to delete."
+        return None
+
+    user = f"{task}\n\nRepository: {reader.repo} (branch {reader.ref})\n\nCurrent files:\n{render_files(contents)}"
+    out = await complete_json(system=system, user=user, output=CodeChanges, emit=emit, check=check)
+    for change in out.changes:
+        verb = "Delete" if change.content is None else ("Edit" if change.path in files else "Create")
+        await emit("tool", f"{verb} {change.path}", {"input": {"summary": change.summary}})
+    return out
+
+
+async def implement_experiment(*, plan: ExperimentPlan, reader: RepoReader, emit: Emit) -> CodeChanges:
+    task = (
+        "Implement this approved experiment plan. The flag, its variants and the metric already exist "
+        f"in Flagsmith with exactly these names.\n\n```json\n{plan.model_dump_json(indent=2)}\n```"
+    )
+    return await _write_code(
+        system=prompts.CODER_SYSTEM, task=task, reader=reader, paths=plan.files_to_change, emit=emit
+    )
 
 
 async def cleanup_experiment(
-    *, plan: ExperimentPlan, winner_key: str, workspace: RepoWorkspace, emit: Emit
-) -> tuple[list[FileChange], str, str]:
-    user = (
-        f"Repository: {workspace.repo} (branch {workspace.ref})\n"
-        f"The experiment on flag `{plan.flag_name}` is over. Keep the `{winner_key}` experience "
-        "permanently and remove the experiment code.\n\n"
-        f"Plan for reference:\n```json\n{plan.model_dump_json(indent=2)}\n```"
+    *, plan: ExperimentPlan, winner_key: str, reader: RepoReader, paths: list[str], emit: Emit
+) -> CodeChanges:
+    task = (
+        f"The experiment on flag `{plan.flag_name}` is over. Keep the `{winner_key}` experience permanently "
+        f"and remove the experiment code.\n\nPlan for reference:\n```json\n{plan.model_dump_json(indent=2)}\n```"
     )
-    return await _run_coder(system=prompts.CLEANUP_SYSTEM, user=user, workspace=workspace, emit=emit)
+    return await _write_code(
+        system=prompts.CLEANUP_SYSTEM, task=task, reader=reader, paths=[*paths, *plan.files_to_change], emit=emit
+    )
 
 
-async def analyse_results(*, plan: ExperimentPlan, snapshot: ResultsSnapshot, exposures: Any) -> Recommendation:
+async def analyse_results(
+    *, plan: ExperimentPlan, snapshot: ResultsSnapshot, exposures: Any, emit: Emit
+) -> Recommendation:
     data = {
         "plan": plan.model_dump(),
         "per_variant": [v.model_dump() for v in snapshot.variants],
@@ -143,9 +149,5 @@ async def analyse_results(*, plan: ExperimentPlan, snapshot: ResultsSnapshot, ex
         "results_as_of": snapshot.as_of,
         "exposures": exposures,
     }
-    user = (
-        "Read these experiment results and recommend what to do.\n\n```json\n"
-        + json.dumps(data, default=str, indent=2)
-        + "\n```"
-    )
-    return await run_structured(system=prompts.ANALYST_SYSTEM, user=user, output_model=Recommendation)
+    user = "Read these experiment results and recommend what to do.\n\n" + json.dumps(data, default=str, indent=2)
+    return await complete_json(system=prompts.ANALYST_SYSTEM, user=user, output=Recommendation, emit=emit)

@@ -47,9 +47,10 @@ class GitHubClient:
     async def whoami(self) -> str:
         return (await self._req("GET", "/user"))["login"]
 
-    async def list_files(self, repo: str, ref: str, prefix: str = "") -> list[str]:
+    async def list_files(self, repo: str, ref: str, prefix: str = "") -> dict[str, int]:
+        """Source file paths under `prefix` mapped to their size in bytes."""
         tree = await self._req("GET", f"/repos/{repo}/git/trees/{ref}", params={"recursive": "1"})
-        paths = []
+        files: dict[str, int] = {}
         for item in tree["tree"]:
             path = item["path"]
             if item["type"] != "blob" or not path.startswith(prefix):
@@ -58,8 +59,8 @@ class GitHubClient:
                 continue
             if path.rsplit("/", 1)[-1] in SKIP_NAMES:
                 continue
-            paths.append(path)
-        return paths
+            files[path] = item.get("size", 0)
+        return files
 
     async def read_file(self, repo: str, path: str, ref: str) -> str:
         data = await self._req("GET", f"/repos/{repo}/contents/{path}", params={"ref": ref})
