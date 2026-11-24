@@ -90,6 +90,8 @@ export interface Run {
   shipped: string | null
   events: AgentEvent[]
   error: string | null
+  failed_step: string | null
+  ship_choice: string | null
 }
 
 export interface Status {
@@ -125,6 +127,7 @@ export const api = {
     call<Run>('POST', '/runs', body),
   approvePlan: (id: string, plan: ExperimentPlan) => call<Run>('POST', `/runs/${id}/approve-plan`, plan),
   reject: (id: string) => call<Run>('POST', `/runs/${id}/reject`),
+  retry: (id: string) => call<Run>('POST', `/runs/${id}/retry`),
   launch: (id: string, force = false) => call<Run>('POST', `/runs/${id}/launch?force=${force}`),
   simulate: (id: string, visitors: number, rates: Record<string, number>) =>
     call<Run>('POST', `/runs/${id}/simulate`, { visitors, rates }),

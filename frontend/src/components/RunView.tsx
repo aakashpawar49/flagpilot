@@ -82,7 +82,16 @@ export function RunView({ runId, onChange }: { runId: string; onChange: () => vo
         </ol>
       </header>
 
-      {(error || run.error) && <div className="banner banner-error">{error ?? run.error}</div>}
+      {(error || run.error) && (
+        <div className="banner banner-error row between">
+          <span>{error ?? run.error}</span>
+          {run.status === 'failed' && run.failed_step && (
+            <button className="btn" disabled={pending} onClick={() => act(() => api.retry(run.id))}>
+              Retry {run.failed_step}
+            </button>
+          )}
+        </div>
+      )}
 
       <div className="layout">
         <div className="stack">

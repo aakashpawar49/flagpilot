@@ -137,6 +137,8 @@ class Run(BaseModel):
     launch_pr: PullRequestRef | None = None
     ship_pr: PullRequestRef | None = None
     results: ResultsSnapshot | None = None
-    shipped: str | None = None  # variant key or "control"
+    ship_choice: str | None = None  # arm a human approved to ship
+    shipped: str | None = None  # set once shipping finished
     events: list[AgentEvent] = []
     error: str | None = None
+    failed_step: str | None = None  # which step to resume on retry

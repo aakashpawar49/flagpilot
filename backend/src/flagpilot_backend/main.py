@@ -20,6 +20,7 @@ settings = get_settings()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.pipeline = Pipeline(RunStore(settings.data_dir), settings)
+    app.state.pipeline.recover_interrupted()
     yield
     await app.state.pipeline.aclose()
 
@@ -121,6 +122,11 @@ def get_run(run_id: str) -> Run:
 @app.post("/api/runs/{run_id}/approve-plan")
 async def approve_plan(run_id: str, plan: ExperimentPlan | None = None) -> Run:
     return _guard(pipeline().approve_plan, run_id, plan)
+
+
+@app.post("/api/runs/{run_id}/retry")
+async def retry(run_id: str) -> Run:
+    return _guard(pipeline().retry, run_id)
 
 
 @app.post("/api/runs/{run_id}/reject")

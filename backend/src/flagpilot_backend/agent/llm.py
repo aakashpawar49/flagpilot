@@ -99,19 +99,35 @@ async def _create_with(model: str, messages: list[dict[str, str]], json_mode: bo
     raise _Overloaded(f"{model} failed after retries.")
 
 
+# The last model that answered. Later calls start there instead of re-hitting an overloaded one.
+_last_good: str | None = None
+
+
 async def _create(messages: list[dict[str, str]], json_mode: bool, emit: Emit | None = None) -> str:
-    """Tries the main model, then each fallback model, when a model is overloaded or out of quota."""
+    """Tries the main model, then each fallback model, when a model is overloaded or out of quota.
+    If every model fails, waits and goes through the chain once more."""
+    global _last_good
     s = get_settings()
-    models = [s.llm_model, *[m for m in s.llm_fallback_models if m != s.llm_model]]
+    chain = list(dict.fromkeys([s.llm_model, *s.llm_fallback_models]))
+    if _last_good in chain:
+        chain.remove(_last_good)
+        chain.insert(0, _last_good)
     errors: list[str] = []
-    for i, model in enumerate(models):
-        try:
-            return await _create_with(model, messages, json_mode)
-        except _Overloaded as exc:
-            errors.append(str(exc))
-            if emit and i + 1 < len(models):
-                await emit("info", f"{model} is overloaded or out of quota; switching to {models[i + 1]}.")
-    raise LLMError("All models unavailable: " + " | ".join(errors))
+    for round_ in range(2):
+        for i, model in enumerate(chain):
+            try:
+                text = await _create_with(model, messages, json_mode)
+                _last_good = model
+                return text
+            except _Overloaded as exc:
+                errors.append(str(exc))
+                if emit and i + 1 < len(chain):
+                    await emit("info", f"{model} is overloaded or out of quota; switching to {chain[i + 1]}.")
+        if round_ == 0:
+            if emit:
+                await emit("info", "Every model is busy. Waiting 20 seconds, then trying again.")
+            await asyncio.sleep(20)
+    raise LLMError("All models unavailable: " + " | ".join(errors[-len(chain) :]))
 
 
 def _retry_after(exc: openai.RateLimitError) -> float | None:

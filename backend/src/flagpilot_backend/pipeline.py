@@ -77,12 +77,15 @@ class Pipeline:
 
         return emit
 
-    def _spawn(self, run: Run, step: Callable[[Run], Awaitable[None]]) -> None:
+    def _spawn(self, run: Run, step: Callable[[Run], Awaitable[None]], name: str) -> None:
         async def wrapper() -> None:
+            run.error = None
+            run.failed_step = None
             try:
                 await step(run)
             except Exception as exc:  # surface every failure on the run timeline
                 run.status = RunStatus.FAILED
+                run.failed_step = name
                 run.error = f"{type(exc).__name__}: {exc}"
                 await self._emitter(run)("error", run.error)
 
@@ -106,7 +109,7 @@ class Pipeline:
     def create_run(self, *, goal: str, repo: str, base_branch: str, app_path: str) -> Run:
         run = Run(id=uuid.uuid4().hex[:10], goal=goal, repo=repo, base_branch=base_branch, app_path=app_path)
         self.store.save(run)
-        self._spawn(run, self._plan)
+        self._spawn(run, self._plan, "plan")
         return run
 
     async def _plan(self, run: Run) -> None:
@@ -128,7 +131,7 @@ class Pipeline:
         run.status = RunStatus.PROVISIONING
         run.events.append(AgentEvent(kind="approval", message="Plan approved by a human."))
         self.store.save(run)
-        self._spawn(run, self._provision_and_implement)
+        self._spawn(run, self._provision_and_implement, "build")
         return run
 
     async def _provision_and_implement(self, run: Run) -> None:
@@ -137,15 +140,42 @@ class Pipeline:
         assert plan is not None
         fs = self.flagsmith
 
-        feature = await fs.create_multivariate_feature(plan.flag_name, plan.hypothesis, plan.control.value)
-        run.flagsmith.feature_id = feature["id"]
-        await emit("success", f"Created multivariate flag `{plan.flag_name}`.", {"feature_id": feature["id"]})
+        # Each step is skipped if an earlier attempt already did it, so a failed run can be retried.
+        if run.flagsmith.feature_id is None:
+            feature = await fs.create_multivariate_feature(plan.flag_name, plan.hypothesis, plan.control.value)
+            run.flagsmith.feature_id = feature["id"]
+            await emit("success", f"Created multivariate flag `{plan.flag_name}`.", {"feature_id": feature["id"]})
+        feature_id = run.flagsmith.feature_id
 
-        for variant in plan.variants:
-            option = await fs.create_variant_option(feature["id"], variant.key, variant.value)
+        missing = [v for v in plan.variants if v.key not in run.flagsmith.option_ids]
+        for variant in missing:
+            option = await fs.create_variant_option(feature_id, variant.key, variant.value)
             run.flagsmith.option_ids[variant.key] = option["id"]
-        await emit("success", f"Added variants: {', '.join(v.key for v in plan.variants)}.")
+        if missing:
+            await emit("success", f"Added variants: {', '.join(v.key for v in missing)}.")
 
+        if run.flagsmith.experiment_id is None:
+            await self._create_metric_and_experiment(run)
+
+        run.status = RunStatus.CODING
+        await emit("info", "Writing the code change for each variant.")
+        code = await implement_experiment(plan=plan, reader=self._reader(run), emit=emit)
+        run.file_changes = code.changes
+        run.launch_pr = await self._open_pr(
+            run, f"flagpilot/{plan.flag_name}", code.changes, code.pr_title, code.pr_body
+        )
+        run.status = RunStatus.PR_OPEN
+        await emit(
+            "approval",
+            f"Opened PR #{run.launch_pr.number}. Review and merge it, then launch the experiment.",
+            {"url": run.launch_pr.url},
+        )
+
+    async def _create_metric_and_experiment(self, run: Run) -> None:
+        emit = self._emitter(run)
+        plan = run.plan
+        assert plan is not None and run.flagsmith.feature_id is not None
+        fs = self.flagsmith
         existing = next(
             (
                 m
@@ -171,7 +201,7 @@ class Pipeline:
         # Even split: each variant gets an equal share, control takes the remainder.
         share = round(100 / (len(plan.variants) + 1), 2)
         experiment = await fs.create_experiment(
-            feature_id=feature["id"],
+            feature_id=run.flagsmith.feature_id,
             name=plan.title,
             hypothesis=plan.hypothesis,
             metric_id=run.flagsmith.metric_id,
@@ -184,20 +214,6 @@ class Pipeline:
         run.flagsmith.experiment_url = await fs.experiment_url(experiment["id"])
         await emit(
             "success", "Created the experiment in Flagsmith (not started).", {"url": run.flagsmith.experiment_url}
-        )
-
-        run.status = RunStatus.CODING
-        await emit("info", "Writing the code change for each variant.")
-        code = await implement_experiment(plan=plan, reader=self._reader(run), emit=emit)
-        run.file_changes = code.changes
-        run.launch_pr = await self._open_pr(
-            run, f"flagpilot/{plan.flag_name}", code.changes, code.pr_title, code.pr_body
-        )
-        run.status = RunStatus.PR_OPEN
-        await emit(
-            "approval",
-            f"Opened PR #{run.launch_pr.number}. Review and merge it, then launch the experiment.",
-            {"url": run.launch_pr.url},
         )
 
     async def _open_pr(self, run: Run, branch: str, changes: list, title: str, body: str) -> PullRequestRef:
@@ -266,7 +282,7 @@ class Pipeline:
                 "success", "Simulation finished. Flagsmith recomputes results every few minutes.", {"counts": counts}
             )
 
-        self._spawn(run, step)
+        self._spawn(run, step, "simulate")
         return run
 
     # --- 5. analyse ------------------------------------------------------------------
@@ -305,7 +321,7 @@ class Pipeline:
                 run.status = RunStatus.SHIP_READY
                 await emit("approval", f"{rec.headline} Approve a rollout decision to finish the experiment.")
 
-        self._spawn(run, step)
+        self._spawn(run, step, "analyse")
         return run
 
     # --- 6. ship ---------------------------------------------------------------------
@@ -317,12 +333,18 @@ class Pipeline:
         if winner not in valid:
             raise TransitionError(f"winner must be one of {sorted(valid)}")
         run.status = RunStatus.SHIPPING
+        run.ship_choice = winner
         run.events.append(AgentEvent(kind="approval", message=f"Human approved shipping `{winner}`."))
         self.store.save(run)
+        self._spawn(run, self._ship, "ship")
+        return run
 
-        async def step(run: Run) -> None:
-            emit = self._emitter(run)
-            assert run.plan and run.flagsmith.experiment_id
+    async def _ship(self, run: Run) -> None:
+        emit = self._emitter(run)
+        winner = run.ship_choice
+        assert run.plan and run.flagsmith.experiment_id and winner
+        experiment = await self.flagsmith.get_experiment(run.flagsmith.experiment_id)
+        if experiment.get("status") != "completed":  # skip if a previous attempt already completed it
             if winner == "control":
                 await self.flagsmith.complete_experiment(run.flagsmith.experiment_id, "control")
             else:
@@ -330,23 +352,64 @@ class Pipeline:
                     run.flagsmith.experiment_id, "variant", run.flagsmith.option_ids[winner]
                 )
             await emit("success", f"Experiment completed in Flagsmith. Everyone now gets `{winner}`.")
-            await emit("info", "Removing the experiment code so the flag can be retired.")
-            code = await cleanup_experiment(
-                plan=run.plan,
-                winner_key=winner,
-                reader=self._reader(run),
-                paths=[c.path for c in run.file_changes if c.content is not None],
-                emit=emit,
-            )
-            run.ship_pr = await self._open_pr(
-                run, f"flagpilot/{_slug(run.plan.flag_name)}-cleanup", code.changes, code.pr_title, code.pr_body
-            )
-            run.shipped = winner
-            run.status = RunStatus.SHIPPED
-            await emit("success", f"Opened cleanup PR #{run.ship_pr.number}.", {"url": run.ship_pr.url})
+        await emit("info", "Removing the experiment code so the flag can be retired.")
+        code = await cleanup_experiment(
+            plan=run.plan,
+            winner_key=winner,
+            reader=self._reader(run),
+            paths=[c.path for c in run.file_changes if c.content is not None],
+            emit=emit,
+        )
+        run.ship_pr = await self._open_pr(
+            run, f"flagpilot/{_slug(run.plan.flag_name)}-cleanup", code.changes, code.pr_title, code.pr_body
+        )
+        run.shipped = winner
+        run.status = RunStatus.SHIPPED
+        await emit("success", f"Opened cleanup PR #{run.ship_pr.number}.", {"url": run.ship_pr.url})
 
-        self._spawn(run, step)
+    # --- recovery --------------------------------------------------------------------
+
+    def retry(self, run_id: str) -> Run:
+        """Resumes a failed run from the step that failed. Work already done is not repeated."""
+        run = self._load(run_id, RunStatus.FAILED)
+        step = run.failed_step
+        run.events.append(AgentEvent(kind="info", message=f"Retrying the `{step}` step."))
+        if step == "plan":
+            run.status = RunStatus.PLANNING
+            self.store.save(run)
+            self._spawn(run, self._plan, "plan")
+        elif step == "build":
+            run.status = RunStatus.PROVISIONING
+            self.store.save(run)
+            self._spawn(run, self._provision_and_implement, "build")
+        elif step == "ship":
+            run.status = RunStatus.SHIPPING
+            self.store.save(run)
+            self._spawn(run, self._ship, "ship")
+        elif step in ("simulate", "analyse"):
+            run.status = RunStatus.RUNNING  # both can simply be triggered again
+            run.error = run.failed_step = None
+            self.store.save(run)
+        else:
+            raise TransitionError(f"Don't know how to retry step {step!r}.")
         return run
+
+    def recover_interrupted(self) -> None:
+        """Marks runs whose background work died with the previous server process as failed."""
+        busy = {
+            RunStatus.PLANNING: "plan",
+            RunStatus.PROVISIONING: "build",
+            RunStatus.CODING: "build",
+            RunStatus.ANALYSING: "analyse",
+            RunStatus.SHIPPING: "ship",
+        }
+        for run in self.store.list():
+            if run.status in busy:
+                run.failed_step = busy[run.status]
+                run.status = RunStatus.FAILED
+                run.error = "Interrupted by a server restart. Retry to resume."
+                run.events.append(AgentEvent(kind="error", message=run.error))
+                self.store.save(run)
 
     def reject(self, run_id: str) -> Run:
         run = self._load(run_id, RunStatus.PLAN_READY)
