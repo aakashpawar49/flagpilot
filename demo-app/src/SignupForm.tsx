@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useFlagsmith } from '@flagsmith/flagsmith/react'
 import { createAccount } from './api'
 
 type Props = { onSuccess: (firstName: string) => void }
@@ -6,6 +7,7 @@ type Props = { onSuccess: (firstName: string) => void }
 export function SignupForm({ onSuccess }: Props) {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const flagsmith = useFlagsmith()
 
   async function handleSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault()
@@ -14,6 +16,7 @@ export function SignupForm({ onSuccess }: Props) {
     setError(null)
     try {
       await createAccount(data)
+      flagsmith.trackEvent('signup_completed')
       onSuccess(data.fullName.split(' ')[0])
     } catch (err) {
       setError((err as Error).message)
@@ -34,31 +37,6 @@ export function SignupForm({ onSuccess }: Props) {
       <label>
         Work email
         <input name="email" type="email" autoComplete="email" required />
-      </label>
-      <label>
-        Company
-        <input name="company" autoComplete="organization" required />
-      </label>
-      <label>
-        Role
-        <select name="role" required defaultValue="">
-          <option value="" disabled>Choose one</option>
-          <option>Engineering manager</option>
-          <option>Tech lead</option>
-          <option>Director / VP</option>
-          <option>Engineer</option>
-          <option>Other</option>
-        </select>
-      </label>
-      <label>
-        Team size
-        <select name="teamSize" required defaultValue="">
-          <option value="" disabled>Choose one</option>
-          <option>1–5</option>
-          <option>6–15</option>
-          <option>16–50</option>
-          <option>50+</option>
-        </select>
       </label>
       <label>
         Password
