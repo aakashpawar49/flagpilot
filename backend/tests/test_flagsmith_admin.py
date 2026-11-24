@@ -36,12 +36,16 @@ async def test_create_experiment_payload_and_auth():
     assert body["metrics"] == [{"metric": 9, "expected_direction": "increase"}]
     rollout = body["experiment_rollout"]
     assert rollout["feature_state_value"] == {"type": "string", "value": "control"}
-    assert rollout["multivariate_feature_state_values"] == [{"multivariate_feature_option": 11, "percentage_allocation": 50.0}]
+    assert rollout["multivariate_feature_state_values"] == [
+        {"multivariate_feature_option": 11, "percentage_allocation": 50.0}
+    ]
 
 
 @respx.mock
 async def test_variant_option_keyed_with_zero_default_allocation():
-    route = respx.post(f"{API}/projects/7/features/5/mv-options/").mock(return_value=httpx.Response(201, json={"id": 3}))
+    route = respx.post(f"{API}/projects/7/features/5/mv-options/").mock(
+        return_value=httpx.Response(201, json={"id": 3})
+    )
     await client().create_variant_option(5, "short_form", "short_form")
     body = json.loads(route.calls.last.request.content)
     assert body == {

@@ -106,7 +106,7 @@ def list_runs() -> list[Run]:
 
 
 @app.post("/api/runs", status_code=201)
-def create_run(body: CreateRun) -> Run:
+async def create_run(body: CreateRun) -> Run:
     return pipeline().create_run(goal=body.goal, repo=body.repo, base_branch=body.base_branch, app_path=body.app_path)
 
 
@@ -119,12 +119,12 @@ def get_run(run_id: str) -> Run:
 
 
 @app.post("/api/runs/{run_id}/approve-plan")
-def approve_plan(run_id: str, plan: ExperimentPlan | None = None) -> Run:
+async def approve_plan(run_id: str, plan: ExperimentPlan | None = None) -> Run:
     return _guard(pipeline().approve_plan, run_id, plan)
 
 
 @app.post("/api/runs/{run_id}/reject")
-def reject(run_id: str) -> Run:
+async def reject(run_id: str) -> Run:
     return _guard(pipeline().reject, run_id)
 
 
@@ -141,17 +141,17 @@ async def launch(run_id: str, force: bool = False) -> Run:
 
 
 @app.post("/api/runs/{run_id}/simulate")
-def simulate(run_id: str, body: SimulateBody) -> Run:
+async def simulate(run_id: str, body: SimulateBody) -> Run:
     return _guard(pipeline().simulate, run_id, visitors=body.visitors, rates=body.rates)
 
 
 @app.post("/api/runs/{run_id}/analyse")
-def analyse(run_id: str) -> Run:
+async def analyse(run_id: str) -> Run:
     return _guard(pipeline().analyse, run_id)
 
 
 @app.post("/api/runs/{run_id}/ship")
-def ship(run_id: str, body: ShipBody) -> Run:
+async def ship(run_id: str, body: ShipBody) -> Run:
     return _guard(pipeline().ship, run_id, winner=body.winner)
 
 

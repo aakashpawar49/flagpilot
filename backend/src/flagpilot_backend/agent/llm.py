@@ -34,7 +34,7 @@ def get_client() -> openai.AsyncOpenAI:
         s = get_settings()
         if not s.llm_api_key:
             raise LLMError("LLM_API_KEY is not set.")
-        _client = openai.AsyncOpenAI(base_url=s.llm_base_url, api_key=s.llm_api_key, max_retries=0, timeout=180)
+        _client = openai.AsyncOpenAI(base_url=s.llm_base_url, api_key=s.llm_api_key, max_retries=0, timeout=120)
     return _client
 
 
@@ -61,12 +61,17 @@ def schema_instructions(model: type[BaseModel]) -> str:
     )
 
 
-async def _create(messages: list[dict[str, str]], json_mode: bool) -> str:
-    s = get_settings()
-    kwargs: dict[str, Any] = {"model": s.llm_model, "messages": messages}
+class _Overloaded(Exception):
+    """The model stayed unavailable (503 / quota exhausted); try the next model."""
+
+
+async def _create_with(model: str, messages: list[dict[str, str]], json_mode: bool) -> str:
+    kwargs: dict[str, Any] = {"model": model, "messages": messages}
     if json_mode:
         kwargs["response_format"] = {"type": "json_object"}
-    for attempt in range(5):
+    attempts = 3
+    for attempt in range(attempts):
+        last = attempt == attempts - 1
         try:
             resp = await get_client().chat.completions.create(**kwargs)
             choice = resp.choices[0]
@@ -74,10 +79,9 @@ async def _create(messages: list[dict[str, str]], json_mode: bool) -> str:
                 raise LLMError("Model output was cut off (max tokens). Try a smaller change or a larger model.")
             return choice.message.content or ""
         except openai.RateLimitError as exc:
-            wait = _retry_after(exc) or min(60, 10 * (attempt + 1))
-            if attempt == 4:
-                raise LLMError(f"Rate limited by the LLM provider: {exc}") from exc
-            await asyncio.sleep(wait)
+            if last:
+                raise _Overloaded(f"{model} rate limited: {exc}") from exc
+            await asyncio.sleep(min(_retry_after(exc) or 10 * (attempt + 1), 30))
         except openai.BadRequestError as exc:
             # Some providers reject response_format; fall back to prompt-only JSON.
             if json_mode and "response_format" in str(exc):
@@ -85,11 +89,29 @@ async def _create(messages: list[dict[str, str]], json_mode: bool) -> str:
                 json_mode = False
                 continue
             raise LLMError(f"LLM request rejected: {exc}") from exc
-        except (openai.APIConnectionError, openai.InternalServerError) as exc:
-            if attempt == 4:
-                raise LLMError(f"LLM provider unavailable: {exc}") from exc
-            await asyncio.sleep(5 * (attempt + 1))
-    raise LLMError("LLM request failed after retries.")
+        except openai.InternalServerError as exc:
+            # 503 "high demand" can last minutes on free tiers: move to the next model now.
+            raise _Overloaded(f"{model} unavailable: {exc}") from exc
+        except openai.APIConnectionError as exc:  # includes timeouts
+            if last:
+                raise _Overloaded(f"{model} unreachable: {exc}") from exc
+            await asyncio.sleep(3)
+    raise _Overloaded(f"{model} failed after retries.")
+
+
+async def _create(messages: list[dict[str, str]], json_mode: bool, emit: Emit | None = None) -> str:
+    """Tries the main model, then each fallback model, when a model is overloaded or out of quota."""
+    s = get_settings()
+    models = [s.llm_model, *[m for m in s.llm_fallback_models if m != s.llm_model]]
+    errors: list[str] = []
+    for i, model in enumerate(models):
+        try:
+            return await _create_with(model, messages, json_mode)
+        except _Overloaded as exc:
+            errors.append(str(exc))
+            if emit and i + 1 < len(models):
+                await emit("info", f"{model} is overloaded or out of quota; switching to {models[i + 1]}.")
+    raise LLMError("All models unavailable: " + " | ".join(errors))
 
 
 def _retry_after(exc: openai.RateLimitError) -> float | None:
@@ -115,7 +137,7 @@ async def complete_json[T: BaseModel](
     ]
     last_error = ""
     for _ in range(attempts):
-        text = await _create(messages, json_mode=True)
+        text = await _create(messages, json_mode=True, emit=emit)
         try:
             result = output.model_validate(extract_json(text))
             problem = await check(result) if check else None

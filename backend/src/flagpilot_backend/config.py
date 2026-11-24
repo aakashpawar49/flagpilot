@@ -15,6 +15,8 @@ class Settings(BaseSettings):
     llm_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai/"
     llm_api_key: str = ""
     llm_model: str = "gemini-flash-latest"
+    # Tried in order when the main model is overloaded (503) or out of free quota (429).
+    llm_fallback_models: list[str] = ["gemini-flash-lite-latest"]
     # Upper bound on repository text sent to the model in one request.
     llm_max_context_chars: int = 120_000
 

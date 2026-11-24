@@ -80,3 +80,21 @@ async def test_falls_back_when_response_format_unsupported(monkeypatch):
     assert (await llm.complete_json(system="s", user="u", output=Answer)).value == 1
     assert "response_format" in sent[0]
     assert "response_format" not in sent[1]
+
+
+async def test_switches_to_fallback_model_when_overloaded(monkeypatch):
+    async def no_sleep(_):
+        return None
+
+    monkeypatch.setattr(llm.asyncio, "sleep", no_sleep)
+    overloaded = httpx2.Response(503, json={"error": {"message": "high demand"}})
+    sent = fake_llm(monkeypatch, [overloaded, completion('{"value": 5}')])
+    events = []
+
+    async def emit(kind, message, detail=None):
+        events.append(message)
+
+    assert (await llm.complete_json(system="s", user="u", output=Answer, emit=emit)).value == 5
+    s = llm.get_settings()
+    assert [b["model"] for b in sent] == [s.llm_model, s.llm_fallback_models[0]]
+    assert any("switching to" in m for m in events)
