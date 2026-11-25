@@ -133,7 +133,12 @@ export function Results({ run, pending, act }: {
             <dt>Checked</dt>
             <dd>{new Date(health.checked_at).toLocaleTimeString()}</dd>
           </dl>
-          {health.issues.length === 0 ? (
+          {health.issues.length === 0 && Object.values(health.exposures).every((n) => n === 0) ? (
+            <p className="muted small">
+              No visitors yet. Open the app or run a simulation; FlagPilot pulls fresh numbers from Flagsmith every
+              5 minutes and flags a problem if an arm stays empty.
+            </p>
+          ) : health.issues.length === 0 ? (
             <p className="ok-text">✓ Exposures and conversions are arriving for every arm; the split matches the plan.</p>
           ) : (
             <ul className="issues">{health.issues.map((i) => <li key={i}>{i}</li>)}</ul>

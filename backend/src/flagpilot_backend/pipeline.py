@@ -6,9 +6,11 @@ ship_ready --(approve decision)--> shipping -> shipped
 """
 
 import asyncio
+import math
 import re
 import uuid
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 from typing import Any
 
 from .agent import prompts
@@ -304,6 +306,7 @@ class Pipeline:
         for run in self.store.list():
             if run.status in (RunStatus.RUNNING, RunStatus.SHIP_READY):
                 self._start_monitor(run.id)
+                self.nudge(run.id)  # check right away after a restart
 
     def _start_monitor(self, run_id: str) -> None:
         existing = self._monitors.get(run_id)
@@ -319,9 +322,10 @@ class Pipeline:
 
     async def _monitor(self, run_id: str) -> None:
         nudge = self._nudges[run_id]
+        wait = float(self.MONITOR_INTERVAL)
         while True:
             try:
-                await asyncio.wait_for(nudge.wait(), timeout=self.MONITOR_INTERVAL)
+                await asyncio.wait_for(nudge.wait(), timeout=wait)
             except TimeoutError:
                 pass
             nudge.clear()
@@ -333,12 +337,16 @@ class Pipeline:
             if run is None or run.status not in (RunStatus.RUNNING, RunStatus.SHIP_READY):
                 return
             try:
-                await self._refresh_snapshot(run)
+                retry_in = await self._refresh_snapshot(run)
+                # If Flagsmith throttled the recompute, come back as soon as it will accept one.
+                wait = min(self.MONITOR_INTERVAL, retry_in + 5) if retry_in > 0 else float(self.MONITOR_INTERVAL)
             except Exception as exc:
+                wait = float(self.MONITOR_INTERVAL)
                 await self._emitter(run)("error", f"Monitor: {type(exc).__name__}: {exc}")
 
-    async def _refresh_snapshot(self, run: Run) -> bool:
-        """Pulls the latest results, applies the stopping rule and health checks. No LLM."""
+    async def _refresh_snapshot(self, run: Run) -> float:
+        """Pulls the latest results, applies the stopping rule and health checks. No LLM.
+        Returns seconds until Flagsmith will accept another recompute (0 if it just did)."""
         emit = self._emitter(run)
         exp_id = run.flagsmith.experiment_id
         assert exp_id and run.plan
@@ -365,10 +373,18 @@ class Pipeline:
             await emit("approval", f"{verdict.summary} Approve the rollout decision to finish the experiment.")
         elif verdict and verdict.decision == "keep_running" and run.status == RunStatus.SHIP_READY:
             run.status = RunStatus.RUNNING
-        if not refreshed and not snapshot.variants and not health.issues:
-            await emit("info", "Flagsmith allows one recompute every 5 minutes; checking again at the next tick.")
+        retry_in = 0.0
+        if not refreshed:
+            requested = (raw or {}).get("refresh_requested_at")
+            if requested:
+                since = (now() - datetime.fromisoformat(requested.replace("Z", "+00:00"))).total_seconds()
+                retry_in = max(0.0, self.MONITOR_INTERVAL - since)
+            await emit(
+                "info",
+                f"Flagsmith allows one recompute every 5 minutes; next check in about {max(1, math.ceil(retry_in / 60))} min.",
+            )
         self.store.save(run)
-        return refreshed
+        return retry_in
 
     # --- 4. simulate (demo only) -----------------------------------------------------
 
