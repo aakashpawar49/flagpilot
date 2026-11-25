@@ -39,3 +39,12 @@ def test_fix_merge_keeps_files_the_model_did_not_resend():
     merged = {c.path: c for c in previous.changes}
     merged.update({c.path: c for c in fix.changes})
     assert {c.path: c.content for c in merged.values()} == {"a.ts": "A", "b.ts": "B2"}
+
+
+def test_missing_conversion_event_guard():
+    from flagpilot_backend.agent.agents import missing_conversion_event
+
+    changes = [FileChange(path="App.tsx", content="<h1>new headline</h1>", summary="")]
+    assert missing_conversion_event(changes, "cta_clicked") is True
+    changes.append(FileChange(path="Nav.tsx", content="onClick={() => fs.trackEvent('cta_clicked')}", summary=""))
+    assert missing_conversion_event(changes, "cta_clicked") is False

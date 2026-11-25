@@ -93,7 +93,20 @@ async def plan_experiment(*, goal: str, reader: RepoReader, flagsmith: Flagsmith
     return await complete_json(system=prompts.PLANNER_SYSTEM, user=user, output=ExperimentPlan, emit=emit, check=check)
 
 
-async def _write_code(*, system: str, task: str, reader: RepoReader, paths: list[str], emit: Emit) -> CodeChanges:
+def missing_conversion_event(changes: list[FileChange], event: str) -> bool:
+    """True when no written file mentions the metric's event name: the experiment would never convert."""
+    return not any(event in (c.content or "") for c in changes)
+
+
+async def _write_code(
+    *,
+    system: str,
+    task: str,
+    reader: RepoReader,
+    paths: list[str],
+    emit: Emit,
+    conversion_event: str | None = None,
+) -> CodeChanges:
     files = await reader.files()
     contents = await reader.read_many([*paths, *reader.entry_files()], get_settings().llm_max_context_chars)
     await emit("tool", f"Read {len(contents)} files", {"input": {"files": list(contents)}})
@@ -106,6 +119,12 @@ async def _write_code(*, system: str, task: str, reader: RepoReader, paths: list
                 return f"{change.path}: cannot delete a file that doesn't exist."
             if change.content is not None and not change.content.strip():
                 return f"{change.path}: content is empty. Give the complete file or null to delete."
+        if conversion_event and missing_conversion_event(out.changes, conversion_event):
+            return (
+                f"The change never sends the `{conversion_event}` event, so the experiment could never record a "
+                f"conversion. Call trackEvent('{conversion_event}') (or the SDK equivalent) exactly where the "
+                "success action happens, and return the complete files again."
+            )
         return None
 
     user = f"{task}\n\nRepository: {reader.repo} (branch {reader.ref})\n\nCurrent files:\n{render_files(contents)}"
@@ -150,7 +169,12 @@ async def implement_experiment(*, plan: ExperimentPlan, reader: RepoReader, emit
         f"in Flagsmith with exactly these names.\n\n```json\n{plan.model_dump_json(indent=2)}\n```"
     )
     return await _write_code(
-        system=prompts.CODER_SYSTEM, task=task, reader=reader, paths=plan.files_to_change, emit=emit
+        system=prompts.CODER_SYSTEM,
+        task=task,
+        reader=reader,
+        paths=plan.files_to_change,
+        emit=emit,
+        conversion_event=plan.metric.event,
     )
 
 

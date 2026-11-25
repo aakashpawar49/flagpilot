@@ -1,10 +1,11 @@
 import { useState } from 'react'
 import { SignupForm } from './SignupForm'
-import { useExperiment, useFlagsmithLoading } from '@flagsmith/flagsmith/react'
+import { useExperiment, useFlagsmith, useFlagsmithLoading } from '@flagsmith/flagsmith/react'
 
 export default function App() {
   const [signedUp, setSignedUp] = useState<string | null>(null)
   const loading = useFlagsmithLoading()
+  const flagsmith = useFlagsmith()
   const experimentFlag = useExperiment('signup_form_experiment')
   const heroFlag = useExperiment('hero_headline_variant')
   const variant = (experimentFlag?.value as string | undefined) ?? 'control'
@@ -17,7 +18,9 @@ export default function App() {
         <nav>
           <a href="#features">Features</a>
           <a href="#pricing">Pricing</a>
-          <a href="#signup" className="nav-cta">Start free</a>
+          <a href="#signup" className="nav-cta" onClick={() => flagsmith.trackEvent('cta_clicked')}>
+            Start free
+          </a>
         </nav>
       </header>
 
