@@ -6,7 +6,9 @@ export default function App() {
   const [signedUp, setSignedUp] = useState<string | null>(null)
   const loading = useFlagsmithLoading()
   const experimentFlag = useExperiment('signup_form_experiment')
+  const heroFlag = useExperiment('hero_headline_variant')
   const variant = (experimentFlag?.value as string | undefined) ?? 'control'
+  const heroVariant = (heroFlag?.value as string | undefined) ?? 'control'
 
   return (
     <div className="page">
@@ -22,7 +24,15 @@ export default function App() {
       <main className="hero">
         <section className="pitch">
           <p className="eyebrow">Team analytics for engineering leads</p>
-          <h1>See where your team's week actually goes.</h1>
+          {loading?.isLoading ? (
+             <h1>See where your team's week actually goes.</h1>
+          ) : (
+            <h1>
+              {heroVariant === 'benefit_led' 
+                ? 'Ship faster with complete visibility into focus time and review bottlenecks.' 
+                : 'See where your team\'s week actually goes.'}
+            </h1>
+          )}
           <p className="sub">
             Lumen connects to GitHub, Linear and your calendar, then shows focus time, review load and
             blockers in one weekly report. No surveys, no time tracking.
