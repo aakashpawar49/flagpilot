@@ -237,3 +237,5 @@ details summary { cursor: pointer; color: var(--muted); font-size: 0.88rem; }
 .rec-keep_running { border-color: var(--border); }
 .ok-text { color: var(--live); margin: 0; font-size: 0.9rem; }
 .issues { margin: 0; padding-left: 18px; color: var(--error); font-size: 0.9rem; display: flex; flex-direction: column; gap: 4px; }
+
+.wide-inline { width: 170px; }

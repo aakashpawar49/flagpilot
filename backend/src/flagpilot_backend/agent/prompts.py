@@ -87,6 +87,9 @@ What a good plan looks like:
   variant's value equals its key.
 - One primary metric whose event fires early in a visit (the experiment has
   days, not weeks, of traffic). Prefer occurrence aggregation for conversions.
+  If the developer named the success metric in their request, use exactly that
+  (define a new event for it if none exists); only fall back to an existing
+  metric when the request leaves the metric open.
 - flag_name is snake_case and not already used in the project.
 - baseline_rate is your best estimate of today's conversion rate for the metric
   (as a fraction), and min_detectable_lift the smallest relative improvement

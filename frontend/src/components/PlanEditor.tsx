@@ -88,8 +88,35 @@ export function PlanEditor({ plan, editable, pending, onApprove, onReject }: {
         <dd className="mono">{draft.flag_name}</dd>
         <dt>Primary metric</dt>
         <dd>
-          {draft.metric.name} · <span className="mono">{draft.metric.event}</span> · {draft.metric.aggregation},{' '}
-          {draft.metric.direction === 'up' ? 'higher is better' : 'lower is better'}
+          {editable ? (
+            <span className="row wrap">
+              <input
+                className="inline-input wide-inline"
+                value={draft.metric.name}
+                onChange={(e) => set('metric', { ...draft.metric, name: e.target.value })}
+                placeholder="Metric name"
+              />
+              <input
+                className="inline-input wide-inline mono"
+                value={draft.metric.event}
+                onChange={(e) => set('metric', { ...draft.metric, event: e.target.value.toLowerCase().replace(/[^a-z0-9_.:-]/g, '_') })}
+                placeholder="event_name"
+              />
+              <select
+                className="inline-input"
+                value={draft.metric.direction}
+                onChange={(e) => set('metric', { ...draft.metric, direction: e.target.value as 'up' | 'down' })}
+              >
+                <option value="up">higher is better</option>
+                <option value="down">lower is better</option>
+              </select>
+            </span>
+          ) : (
+            <>
+              {draft.metric.name} · <span className="mono">{draft.metric.event}</span> · {draft.metric.aggregation},{' '}
+              {draft.metric.direction === 'up' ? 'higher is better' : 'lower is better'}
+            </>
+          )}
         </dd>
         <dt>Rollout</dt>
         <dd>
