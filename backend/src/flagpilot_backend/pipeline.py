@@ -11,9 +11,11 @@ import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from .agent import prompts
 from .agent.agents import (
     cleanup_experiment,
     explain_results,
+    fix_build,
     implement_experiment,
     plan_experiment,
 )
@@ -25,6 +27,7 @@ from .models import AgentEvent, ExperimentPlan, PullRequestRef, Run, RunStatus, 
 from .results import build_health, parse_results
 from .simulator import simulate_traffic
 from .store import RunStore
+from .verify import verify_changes
 
 
 class TransitionError(RuntimeError):
@@ -174,6 +177,7 @@ class Pipeline:
         run.status = RunStatus.CODING
         await emit("info", "Writing the code change for each variant.")
         code = await implement_experiment(plan=plan, reader=self._reader(run), emit=emit)
+        code = await self._verified(run, code, system=prompts.CODER_SYSTEM)
         run.file_changes = code.changes
         run.launch_pr = await self._open_pr(
             run, f"flagpilot/{plan.flag_name}", code.changes, code.pr_title, code.pr_body
@@ -229,6 +233,35 @@ class Pipeline:
         await emit(
             "success", "Created the experiment in Flagsmith (not started).", {"url": run.flagsmith.experiment_url}
         )
+
+    async def _verified(self, run: Run, code, *, system: str):
+        """Builds the change on a clean clone; on failure asks the model to fix it, up to twice."""
+        if not self.settings.verify_build:
+            return code
+        emit = self._emitter(run)
+        for attempt in range(1, 4):
+            await emit("info", f"Building the change on a clean clone (attempt {attempt}).")
+            report = await verify_changes(
+                repo=run.repo,
+                base_branch=run.base_branch,
+                token=self.settings.github_token,
+                changes=code.changes,
+                app_path=run.app_path,
+            )
+            await emit(
+                "success" if report.ok else "error",
+                f"Build check: {report.summary}",
+                {"input": {"log": report.log[-1500:]}} if report.log else None,
+            )
+            if report.ok:
+                return code
+            if attempt == 3:
+                raise RuntimeError("The change still fails to build after two fixes. Not opening a PR.")
+            await emit("info", "Sending the build errors back to the model to fix.")
+            code = await fix_build(
+                previous=code, build_log=report.log, system=system, reader=self._reader(run), emit=emit
+            )
+        return code
 
     async def _open_pr(self, run: Run, branch: str, changes: list, title: str, body: str) -> PullRequestRef:
         branch = f"{branch}-{run.id[:4]}"
@@ -454,6 +487,7 @@ class Pipeline:
             paths=[c.path for c in run.file_changes if c.content is not None],
             emit=emit,
         )
+        code = await self._verified(run, code, system=prompts.CLEANUP_SYSTEM)
         run.ship_pr = await self._open_pr(
             run, f"flagpilot/{_slug(run.plan.flag_name)}-cleanup", code.changes, code.pr_title, code.pr_body
         )

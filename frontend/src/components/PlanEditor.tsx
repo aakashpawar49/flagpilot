@@ -2,6 +2,18 @@ import { useEffect, useState } from 'react'
 import type { ExperimentPlan } from '../api'
 import { Card, Field } from './ui'
 
+// Mirrors backend stats.required_sample_per_arm so edits preview instantly (two-proportion z-test, α 0.05, power 0.8).
+function requiredSamplePerArm(baseline: number, relativeLift: number): number {
+  const p1 = baseline
+  const p2 = Math.min(0.999, p1 * (1 + relativeLift))
+  if (!(p1 > 0 && p1 < 1) || p2 <= p1) return NaN
+  const zAlpha = 1.959964
+  const zBeta = 0.841621
+  const pBar = (p1 + p2) / 2
+  const numerator = (zAlpha * Math.sqrt(2 * pBar * (1 - pBar)) + zBeta * Math.sqrt(p1 * (1 - p1) + p2 * (1 - p2))) ** 2
+  return Math.ceil(numerator / (p2 - p1) ** 2)
+}
+
 export function PlanEditor({ plan, editable, pending, onApprove, onReject }: {
   plan: ExperimentPlan
   editable: boolean
@@ -15,6 +27,10 @@ export function PlanEditor({ plan, editable, pending, onApprove, onReject }: {
   const set = <K extends keyof ExperimentPlan>(key: K, value: ExperimentPlan[K]) => setDraft({ ...draft, [key]: value })
   const arms = [draft.control, ...draft.variants]
   const share = (100 / arms.length).toFixed(0)
+  const requiredPerArm = requiredSamplePerArm(draft.baseline_rate, draft.min_detectable_lift)
+  const estimatedDays = draft.expected_daily_visitors
+    ? Math.round((10 * requiredPerArm * arms.length) / (draft.expected_daily_visitors * draft.rollout_percentage / 100)) / 10
+    : null
 
   return (
     <Card
@@ -90,6 +106,52 @@ export function PlanEditor({ plan, editable, pending, onApprove, onReject }: {
             draft.rollout_percentage
           )}
           % of identities enter the experiment
+        </dd>
+        <dt>Power analysis</dt>
+        <dd>
+          baseline{' '}
+          {editable ? (
+            <input
+              type="number"
+              min={0.1}
+              max={99}
+              step={0.5}
+              className="inline-input"
+              value={Math.round(draft.baseline_rate * 1000) / 10}
+              onChange={(e) => set('baseline_rate', Number(e.target.value) / 100)}
+            />
+          ) : (
+            Math.round(draft.baseline_rate * 1000) / 10
+          )}
+          %, detect at least{' '}
+          {editable ? (
+            <input
+              type="number"
+              min={1}
+              max={500}
+              step={5}
+              className="inline-input"
+              value={Math.round(draft.min_detectable_lift * 100)}
+              onChange={(e) => set('min_detectable_lift', Number(e.target.value) / 100)}
+            />
+          ) : (
+            Math.round(draft.min_detectable_lift * 100)
+          )}
+          % relative lift → <strong>{requiredPerArm.toLocaleString()}</strong> visitors per arm
+          {editable && (
+            <>
+              {' '}· daily visitors{' '}
+              <input
+                type="number"
+                min={1}
+                className="inline-input"
+                placeholder="?"
+                value={draft.expected_daily_visitors ?? ''}
+                onChange={(e) => set('expected_daily_visitors', e.target.value ? Number(e.target.value) : null)}
+              />
+            </>
+          )}
+          {estimatedDays !== null && <> → about <strong>{estimatedDays}</strong> days</>}
         </dd>
         <dt>Files</dt>
         <dd className="mono small">{draft.files_to_change.join(', ')}</dd>

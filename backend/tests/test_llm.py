@@ -37,7 +37,8 @@ def fake_llm(monkeypatch, responses: list[httpx2.Response]) -> list[dict]:
 
     http = httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
     monkeypatch.setattr(llm, "_last_good", None)
-    monkeypatch.setattr(llm, "_client", openai.AsyncOpenAI(base_url=BASE, api_key="k", max_retries=0, http_client=http))
+    fake = openai.AsyncOpenAI(base_url=BASE, api_key="k", max_retries=0, http_client=http)
+    monkeypatch.setattr(llm, "get_client", lambda *args, **kwargs: fake)
     return sent
 
 

@@ -17,6 +17,13 @@ class Settings(BaseSettings):
     llm_model: str = "gemini-flash-latest"
     # Tried in order when the main model is overloaded (503) or out of free quota (429).
     llm_fallback_models: list[str] = ["gemini-flash-lite-latest", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]
+    # Optional second provider, used when every model above is down or out of quota
+    # (for example Groq: https://api.groq.com/openai/v1 with openai/gpt-oss-120b).
+    llm_backup_base_url: str = ""
+    llm_backup_api_key: str = ""
+    llm_backup_model: str = ""
+    # Build the generated change on a clean clone before opening a PR (needs git and npm).
+    verify_build: bool = True
     # Upper bound on repository text sent to the model in one request.
     llm_max_context_chars: int = 120_000
 

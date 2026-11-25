@@ -22,6 +22,11 @@ export interface ExperimentPlan {
   variants: Variant[]
   metric: MetricPlan
   rollout_percentage: number
+  baseline_rate: number
+  min_detectable_lift: number
+  expected_daily_visitors: number | null
+  required_per_arm: number
+  estimated_days: number | null
   files_to_change: string[]
   implementation_notes: string
   risks: string[]
@@ -47,10 +52,23 @@ export interface VariantResult {
   chance_to_win: number | null
 }
 
+export type Decision = 'ship_variant' | 'keep_control' | 'keep_running' | 'invalid'
+
+export interface Check { name: string; ok: boolean | null; detail: string }
+
+export interface Verdict { decision: Decision; variant_key: string | null; summary: string; checks: Check[] }
+
+export interface Health {
+  checked_at: string
+  exposures: Record<string, number>
+  conversions: Record<string, number>
+  srm_p_value: number | null
+  issues: string[]
+}
+
 export interface Recommendation {
-  decision: 'ship_variant' | 'keep_control' | 'keep_running'
+  decision: Decision
   variant_key: string | null
-  confidence: 'low' | 'medium' | 'high'
   headline: string
   explanation: string
   caveats: string[]
@@ -60,7 +78,12 @@ export interface ResultsSnapshot {
   fetched_at: string
   as_of: string | null
   srm_p_value: number | null
+  srm_source: 'flagsmith' | 'flagpilot' | null
+  required_per_arm: number | null
+  exposures: Record<string, number>
+  conversions: Record<string, number>
   variants: VariantResult[]
+  verdict: Verdict | null
   recommendation: Recommendation | null
 }
 
@@ -87,6 +110,8 @@ export interface Run {
   launch_pr: PullRequestRef | null
   ship_pr: PullRequestRef | null
   results: ResultsSnapshot | null
+  health: Health | null
+  launched_at: string | null
   shipped: string | null
   events: AgentEvent[]
   error: string | null

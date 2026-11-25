@@ -2,6 +2,8 @@ import { useState } from 'react'
 import { api, type Run } from '../api'
 import { Card, Field, pct } from './ui'
 
+const CHECK_ICON: Record<string, string> = { true: '✓', false: '✗', null: '…' }
+
 export function Results({ run, pending, act }: {
   run: Run
   pending: boolean
@@ -14,91 +16,137 @@ export function Results({ run, pending, act }: {
     Object.fromEntries(arms.map((k, i) => [k, i === 0 ? 0.1 : 0.14])),
   )
   const results = run.results
+  const verdict = results?.verdict
   const rec = results?.recommendation
+  const health = run.health
   const canAct = run.status === 'running' || run.status === 'ship_ready'
   const hasResults = !!results && results.variants.length > 0
-  const recommended =
-    rec?.decision === 'ship_variant' ? rec.variant_key : rec?.decision === 'keep_control' ? 'control' : null
+  const decided = verdict?.decision === 'ship_variant' || verdict?.decision === 'keep_control'
+  const recommended = verdict?.decision === 'ship_variant' ? verdict.variant_key : verdict?.decision === 'keep_control' ? 'control' : null
+  const required = results?.required_per_arm ?? plan.required_per_arm
+  const smallest = hasResults ? Math.min(...results.variants.map((v) => v.identities ?? 0)) : 0
+  const progress = required ? Math.min(100, Math.round((100 * smallest) / required)) : 0
 
   return (
     <>
       <Card
-        title="Results"
+        title="Stopping rule"
         tone={run.status === 'ship_ready' ? 'attention' : undefined}
         actions={
           canAct && (
             <button className="btn btn-primary" disabled={pending} onClick={() => act(() => api.analyse(run.id))}>
-              {run.status === 'analysing' ? 'Analysing…' : 'Fetch and analyse results'}
+              Refresh and explain
             </button>
           )
         }
       >
-        {!results || results.variants.length === 0 ? (
-          <p className="muted">
-            No results yet. Flagsmith needs at least 50 identities and 5 conversions per arm, and recomputes every few
-            minutes.
-          </p>
-        ) : (
+        <p className="muted small">
+          Pre-registered before launch: baseline {pct(plan.baseline_rate, 0)}, minimum detectable lift{' '}
+          +{pct(plan.min_detectable_lift, 0)}, so each arm needs <strong>{required.toLocaleString()}</strong> visitors
+          (α 0.05, power 0.8). FlagPilot won't call a winner before that; stopping early is how false positives happen.
+        </p>
+        <div className="progress" role="progressbar" aria-valuenow={progress} aria-valuemin={0} aria-valuemax={100}>
+          <div className="progress-fill" style={{ width: `${progress}%` }} />
+          <span>
+            {smallest.toLocaleString()} / {required.toLocaleString()} visitors in the smallest arm ({progress}%)
+          </span>
+        </div>
+        {verdict ? (
           <>
-            <table className="results">
-              <thead>
-                <tr>
-                  <th>Arm</th><th>Visitors</th><th>Conversions</th><th>Rate</th><th>Lift (95% CI)</th><th>Chance to win</th>
-                </tr>
-              </thead>
-              <tbody>
-                {results.variants.map((v) => (
-                  <tr key={v.key} className={rec?.variant_key === v.key ? 'winner' : ''}>
-                    <td className="mono">{v.key}</td>
-                    <td>{v.identities ?? '—'}</td>
-                    <td>{v.conversions ?? '—'}</td>
-                    <td>{pct(v.rate)}</td>
-                    <td>
-                      {v.key === 'control' || v.lift === null
-                        ? '—'
-                        : `${v.lift >= 0 ? '+' : ''}${pct(v.lift)} (${pct(v.ci_low, 0)} to ${pct(v.ci_high, 0)})`}
-                    </td>
-                    <td>
-                      {v.chance_to_win === null ? '—' : (
-                        <div className="meter" title={pct(v.chance_to_win)}>
-                          <div
-                            className={`meter-fill ${v.chance_to_win > 0.95 ? 'win' : v.chance_to_win < 0.05 ? 'lose' : ''}`}
-                            style={{ width: `${v.chance_to_win * 100}%` }}
-                          />
-                          <span>{pct(v.chance_to_win, 0)}</span>
-                        </div>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-            {results.srm_p_value !== null && results.srm_p_value < 0.001 && (
-              <div className="banner banner-error">
-                Sample ratio mismatch (p = {results.srm_p_value.toExponential(1)}): the traffic split looks broken.
-              </div>
-            )}
-            {results.as_of && <p className="muted small">Computed by Flagsmith at {new Date(results.as_of).toLocaleString()}</p>}
-          </>
-        )}
-
-        {rec && (
-          <div className={`recommendation rec-${rec.decision}`}>
-            <div className="row between">
-              <strong>{rec.headline}</strong>
-              <span className="pill pill-muted">{rec.confidence} confidence</span>
+            <ul className="checks">
+              {verdict.checks.map((c) => (
+                <li key={c.name} className={`check check-${String(c.ok)}`}>
+                  <span className="check-icon" aria-hidden>{CHECK_ICON[String(c.ok)]}</span>
+                  <span><strong>{c.name}.</strong> {c.detail}</span>
+                </li>
+              ))}
+            </ul>
+            <div className={`recommendation rec-${verdict.decision}`}>
+              <strong>{verdict.summary}</strong>
+              {rec ? (
+                <>
+                  <p>{rec.explanation}</p>
+                  {rec.caveats.length > 0 && <ul>{rec.caveats.map((c) => <li key={c}>{c}</li>)}</ul>}
+                </>
+              ) : (
+                <p className="muted small">Click “Refresh and explain” for a plain-English reading of the numbers.</p>
+              )}
             </div>
-            <p>{rec.explanation}</p>
-            {rec.caveats.length > 0 && <ul>{rec.caveats.map((c) => <li key={c}>{c}</li>)}</ul>}
-          </div>
+          </>
+        ) : (
+          <p className="muted">
+            No results yet. Flagsmith needs at least 50 visitors and 5 conversions per arm before it reports inference.
+            FlagPilot checks every 5 minutes.
+          </p>
         )}
       </Card>
 
-      {canAct && hasResults && (
-        <Card title="Decide and ship" tone={run.status === 'ship_ready' ? 'attention' : undefined}>
+      {hasResults && (
+        <Card title="Results">
+          <table className="results">
+            <thead>
+              <tr>
+                <th>Arm</th><th>Visitors</th><th>Conversions</th><th>Rate</th><th>Lift (95% interval)</th><th>Chance to win</th>
+              </tr>
+            </thead>
+            <tbody>
+              {results.variants.map((v) => (
+                <tr key={v.key} className={recommended === v.key && decided ? 'winner' : ''}>
+                  <td className="mono">{v.key}</td>
+                  <td>{v.identities ?? '—'}</td>
+                  <td>{v.conversions ?? '—'}</td>
+                  <td>{pct(v.rate)}</td>
+                  <td>
+                    {v.key === 'control' || v.lift === null
+                      ? '—'
+                      : `${v.lift >= 0 ? '+' : ''}${pct(v.lift)} (${pct(v.ci_low, 0)} to ${pct(v.ci_high, 0)})`}
+                  </td>
+                  <td>
+                    {v.chance_to_win === null ? '—' : (
+                      <div className="meter" title={pct(v.chance_to_win)}>
+                        <div
+                          className={`meter-fill ${v.chance_to_win > 0.95 ? 'win' : v.chance_to_win < 0.05 ? 'lose' : ''}`}
+                          style={{ width: `${v.chance_to_win * 100}%` }}
+                        />
+                        <span>{pct(v.chance_to_win, 0)}</span>
+                      </div>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p className="muted small">
+            Computed by Flagsmith {results.as_of ? `at ${new Date(results.as_of).toLocaleString()}` : ''}
+            {results.srm_p_value !== null && ` · split check p = ${results.srm_p_value.toFixed(2)} (${results.srm_source})`}
+          </p>
+        </Card>
+      )}
+
+      {health && (
+        <Card title="Integration health">
+          <dl className="facts">
+            <dt>Exposures</dt>
+            <dd>{arms.map((a) => `${a}: ${health.exposures[a] ?? 0}`).join(' · ')}</dd>
+            <dt>Conversions</dt>
+            <dd>{arms.map((a) => `${a}: ${health.conversions[a] ?? 0}`).join(' · ')}</dd>
+            <dt>Checked</dt>
+            <dd>{new Date(health.checked_at).toLocaleTimeString()}</dd>
+          </dl>
+          {health.issues.length === 0 ? (
+            <p className="ok-text">✓ Exposures and conversions are arriving for every arm; the split matches the plan.</p>
+          ) : (
+            <ul className="issues">{health.issues.map((i) => <li key={i}>{i}</li>)}</ul>
+          )}
+        </Card>
+      )}
+
+      {canAct && decided && (
+        <Card title="Decide and ship" tone="attention">
           <p className="muted small">
             Shipping completes the experiment in Flagsmith (everyone gets the chosen arm) and opens a PR that removes
-            the experiment code. A completed experiment can't be restarted.
+            the experiment code. A completed experiment can't be restarted. The rule recommends{' '}
+            <span className="mono">{recommended}</span>; you have the final say and any override is logged.
           </p>
           <div className="row wrap">
             {arms.map((k) => (
@@ -117,13 +165,13 @@ export function Results({ run, pending, act }: {
         </Card>
       )}
 
-      {canAct && !hasResults && (
+      {canAct && !decided && (
         <details className="card danger-zone">
-          <summary>End the experiment early (no results yet)</summary>
+          <summary>End the experiment early</summary>
           <div className="card-body">
             <p className="muted small">
-              Only do this to abandon the test. Without results there's no evidence for either arm, and a completed
-              experiment can't be restarted.
+              The stopping rule hasn't been met, so there is no evidence for either arm yet. Only do this to abandon
+              the test. A completed experiment can't be restarted.
             </p>
             <div className="row wrap">
               {arms.map((k) => (
@@ -132,7 +180,7 @@ export function Results({ run, pending, act }: {
                   className="btn btn-ghost"
                   disabled={pending}
                   onClick={() => {
-                    const typed = prompt(`There are no results yet. Type END to finish the experiment and ship "${k}".`)
+                    const typed = prompt(`The stopping rule hasn't been met. Type END to finish the experiment and ship "${k}".`)
                     if (typed === 'END') act(() => api.ship(run.id, k, true))
                   }}
                 >

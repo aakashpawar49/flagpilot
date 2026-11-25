@@ -73,7 +73,7 @@ async def test_retry_resumes_build_without_recreating_flagsmith_objects(tmp_path
         )
 
     monkeypatch.setattr(pipeline_mod, "implement_experiment", flaky_implement)
-    p = Pipeline(RunStore(str(tmp_path)), Settings(_env_file=None))
+    p = Pipeline(RunStore(str(tmp_path)), Settings(_env_file=None, verify_build=False))
     fs, gh = FakeFlagsmith(), FakeGitHub()
     p._flagsmith, p._github = fs, gh  # type: ignore[assignment]
 
@@ -95,7 +95,7 @@ async def test_retry_resumes_build_without_recreating_flagsmith_objects(tmp_path
 
 
 def test_recover_interrupted_marks_busy_runs_failed(tmp_path):
-    p = Pipeline(RunStore(str(tmp_path)), Settings(_env_file=None))
+    p = Pipeline(RunStore(str(tmp_path)), Settings(_env_file=None, verify_build=False))
     p.store.save(Run(id="r2", goal="g" * 10, repo="o/r", base_branch="main", status=RunStatus.CODING))
     p.recover_interrupted()
     run = p.store.get("r2")
@@ -107,7 +107,7 @@ def test_ship_requires_results_unless_early(tmp_path):
 
     from flagpilot_backend.pipeline import TransitionError
 
-    p = Pipeline(RunStore(str(tmp_path)), Settings(_env_file=None))
+    p = Pipeline(RunStore(str(tmp_path)), Settings(_env_file=None, verify_build=False))
     p.store.save(Run(id="r3", goal="g" * 10, repo="o/r", base_branch="main", plan=PLAN, status=RunStatus.RUNNING))
     with pytest.raises(TransitionError, match="no results"):
         p.ship("r3", winner="short_form")
@@ -118,7 +118,7 @@ async def test_actions_blocked_while_a_step_runs(tmp_path):
 
     from flagpilot_backend.pipeline import TransitionError
 
-    p = Pipeline(RunStore(str(tmp_path)), Settings(_env_file=None))
+    p = Pipeline(RunStore(str(tmp_path)), Settings(_env_file=None, verify_build=False))
     run = Run(id="r4", goal="g" * 10, repo="o/r", base_branch="main", plan=PLAN, status=RunStatus.RUNNING)
     p.store.save(run)
     gate = asyncio.Event()
@@ -161,7 +161,7 @@ async def test_refresh_snapshot_applies_rule_and_health(tmp_path, monkeypatch):
 
     monkeypatch.setattr(pipeline_mod.asyncio, "sleep", no_sleep)
     payload = json.loads((Path(__file__).parent / "fixtures" / "results_416.json").read_text())
-    p = Pipeline(RunStore(str(tmp_path)), Settings(_env_file=None))
+    p = Pipeline(RunStore(str(tmp_path)), Settings(_env_file=None, verify_build=False))
     p._flagsmith = ResultsFlagsmith(payload)  # type: ignore[assignment]
     plan = PLAN.model_copy(update={"variants": [Variant(key="three_field", value="three_field", description="3")]})
     run = Run(

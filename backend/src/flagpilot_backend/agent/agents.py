@@ -116,6 +116,34 @@ async def _write_code(*, system: str, task: str, reader: RepoReader, paths: list
     return out
 
 
+async def fix_build(
+    *, previous: CodeChanges, build_log: str, system: str, reader: RepoReader, emit: Emit
+) -> CodeChanges:
+    """Second pass: the previous change failed to build; the model corrects it."""
+    files = await reader.files()
+    staged = "\n\n".join(f"=== {c.path} ===\n{c.content}" for c in previous.changes if c.content is not None)
+    user = (
+        "Your previous change did not build. Fix it. Return the COMPLETE corrected contents of every file "
+        "that needs to change (you may include unchanged files from your previous change as-is). Keep the "
+        f"same pull-request title and body unless the fix changes what the PR does.\n\nBuild output:\n```\n{build_log}\n```"
+        f"\n\nYour previous change:\n{staged}"
+    )
+
+    async def check(out: CodeChanges) -> str | None:
+        for change in out.changes:
+            if ".." in change.path.split("/") or change.path.startswith("/"):
+                return f"{change.path}: paths must be repository-relative."
+            if change.content is None and change.path not in files:
+                return f"{change.path}: cannot delete a file that doesn't exist."
+        return None
+
+    out = await complete_json(system=system, user=user, output=CodeChanges, emit=emit, check=check)
+    # Changes the model didn't resend carry over unchanged.
+    merged = {c.path: c for c in previous.changes}
+    merged.update({c.path: c for c in out.changes})
+    return CodeChanges(changes=list(merged.values()), pr_title=out.pr_title, pr_body=out.pr_body)
+
+
 async def implement_experiment(*, plan: ExperimentPlan, reader: RepoReader, emit: Emit) -> CodeChanges:
     task = (
         "Implement this approved experiment plan. The flag, its variants and the metric already exist "

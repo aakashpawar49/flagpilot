@@ -25,17 +25,28 @@ class LLMError(RuntimeError):
     pass
 
 
-_client: openai.AsyncOpenAI | None = None
+_clients: dict[str, openai.AsyncOpenAI] = {}
 
 
-def get_client() -> openai.AsyncOpenAI:
-    global _client
-    if _client is None:
-        s = get_settings()
-        if not s.llm_api_key:
-            raise LLMError("LLM_API_KEY is not set.")
-        _client = openai.AsyncOpenAI(base_url=s.llm_base_url, api_key=s.llm_api_key, max_retries=0, timeout=120)
-    return _client
+def get_client(base_url: str | None = None, api_key: str | None = None) -> openai.AsyncOpenAI:
+    s = get_settings()
+    base_url = base_url or s.llm_base_url
+    api_key = api_key or s.llm_api_key
+    if not api_key:
+        raise LLMError("LLM_API_KEY is not set.")
+    if base_url not in _clients:
+        _clients[base_url] = openai.AsyncOpenAI(base_url=base_url, api_key=api_key, max_retries=0, timeout=120)
+    return _clients[base_url]
+
+
+def model_chain() -> list[tuple[str, str | None, str | None]]:
+    """(model, base_url, api_key) in the order to try. None means the primary provider."""
+    s = get_settings()
+    chain: list[tuple[str, str | None, str | None]] = [(s.llm_model, None, None)]
+    chain += [(m, None, None) for m in s.llm_fallback_models if m != s.llm_model]
+    if s.llm_backup_base_url and s.llm_backup_api_key and s.llm_backup_model:
+        chain.append((s.llm_backup_model, s.llm_backup_base_url, s.llm_backup_api_key))
+    return chain
 
 
 def extract_json(text: str) -> Any:
@@ -65,7 +76,9 @@ class _Overloaded(Exception):
     """The model stayed unavailable (503 / quota exhausted); try the next model."""
 
 
-async def _create_with(model: str, messages: list[dict[str, str]], json_mode: bool) -> str:
+async def _create_with(
+    model: str, messages: list[dict[str, str]], json_mode: bool, base_url: str | None = None, api_key: str | None = None
+) -> str:
     kwargs: dict[str, Any] = {"model": model, "messages": messages}
     if json_mode:
         kwargs["response_format"] = {"type": "json_object"}
@@ -73,7 +86,7 @@ async def _create_with(model: str, messages: list[dict[str, str]], json_mode: bo
     for attempt in range(attempts):
         last = attempt == attempts - 1
         try:
-            resp = await get_client().chat.completions.create(**kwargs)
+            resp = await get_client(base_url, api_key).chat.completions.create(**kwargs)
             choice = resp.choices[0]
             if choice.finish_reason == "length":
                 raise LLMError("Model output was cut off (max tokens). Try a smaller change or a larger model.")
@@ -104,25 +117,23 @@ _last_good: str | None = None
 
 
 async def _create(messages: list[dict[str, str]], json_mode: bool, emit: Emit | None = None) -> str:
-    """Tries the main model, then each fallback model, when a model is overloaded or out of quota.
-    If every model fails, waits and goes through the chain once more."""
+    """Tries the primary model, its same-provider fallbacks, then the backup provider, when a
+    model is overloaded or out of quota. If every model fails, waits and goes once more."""
     global _last_good
-    s = get_settings()
-    chain = list(dict.fromkeys([s.llm_model, *s.llm_fallback_models]))
-    if _last_good in chain:
-        chain.remove(_last_good)
-        chain.insert(0, _last_good)
+    chain = model_chain()
+    if _last_good is not None:
+        chain.sort(key=lambda entry: entry[0] != _last_good)  # start with the model that answered last time
     errors: list[str] = []
     for round_ in range(2):
-        for i, model in enumerate(chain):
+        for i, (model, base_url, api_key) in enumerate(chain):
             try:
-                text = await _create_with(model, messages, json_mode)
+                text = await _create_with(model, messages, json_mode, base_url, api_key)
                 _last_good = model
                 return text
             except _Overloaded as exc:
                 errors.append(str(exc))
                 if emit and i + 1 < len(chain):
-                    await emit("info", f"{model} is overloaded or out of quota; switching to {chain[i + 1]}.")
+                    await emit("info", f"{model} is overloaded or out of quota; switching to {chain[i + 1][0]}.")
         if round_ == 0:
             if emit:
                 await emit("info", "Every model is busy. Waiting 20 seconds, then trying again.")
