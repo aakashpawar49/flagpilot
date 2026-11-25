@@ -1,10 +1,12 @@
 import asyncio
 
+import pytest
+
 from flagpilot_backend import pipeline as pipeline_mod
 from flagpilot_backend.agent.agents import CodeChanges
 from flagpilot_backend.config import Settings
 from flagpilot_backend.models import ExperimentPlan, FileChange, MetricPlan, Run, RunStatus, Variant
-from flagpilot_backend.pipeline import Pipeline
+from flagpilot_backend.pipeline import Pipeline, TransitionError
 from flagpilot_backend.store import RunStore
 
 PLAN = ExperimentPlan(
@@ -131,3 +133,56 @@ async def test_actions_blocked_while_a_step_runs(tmp_path):
     gate.set()
     await asyncio.gather(*p._tasks)
     assert p.store.get("r4").activity is None
+
+
+class ResultsFlagsmith:
+    """Serves the real payload captured from experiment 416."""
+
+    def __init__(self, payload):
+        self.payload = payload
+        self.refreshes = 0
+
+    async def refresh_results(self, _):
+        self.refreshes += 1
+        return True
+
+    async def get_results(self, _):
+        return self.payload
+
+
+async def test_refresh_snapshot_applies_rule_and_health(tmp_path, monkeypatch):
+    import json
+    from pathlib import Path
+
+    from flagpilot_backend.models import FlagsmithRefs, now
+
+    async def no_sleep(_):
+        return None
+
+    monkeypatch.setattr(pipeline_mod.asyncio, "sleep", no_sleep)
+    payload = json.loads((Path(__file__).parent / "fixtures" / "results_416.json").read_text())
+    p = Pipeline(RunStore(str(tmp_path)), Settings(_env_file=None))
+    p._flagsmith = ResultsFlagsmith(payload)  # type: ignore[assignment]
+    plan = PLAN.model_copy(update={"variants": [Variant(key="three_field", value="three_field", description="3")]})
+    run = Run(
+        id="r5",
+        goal="g" * 10,
+        repo="o/r",
+        base_branch="main",
+        plan=plan,
+        status=RunStatus.RUNNING,
+        flagsmith=FlagsmithRefs(experiment_id=416, metric_id=368),
+        launched_at=now(),
+    )
+    p.store.save(run)
+
+    await p._refresh_snapshot(run)
+    saved = p.store.get("r5")
+    assert saved.status == RunStatus.RUNNING  # ~300 per arm is far below the planned sample: keep running
+    assert saved.results.verdict.decision == "keep_running"
+    assert saved.results.required_per_arm == 3841  # plan defaults: 10% baseline, +20% lift
+    assert saved.results.exposures == {"control": 307, "three_field": 293}
+    assert saved.results.srm_source == "flagpilot" and saved.results.srm_p_value > 0.3
+    assert saved.health.issues == []
+    with pytest.raises(TransitionError, match="stopping rule"):
+        p.ship("r5", winner="three_field")

@@ -88,6 +88,11 @@ What a good plan looks like:
 - One primary metric whose event fires early in a visit (the experiment has
   days, not weeks, of traffic). Prefer occurrence aggregation for conversions.
 - flag_name is snake_case and not already used in the project.
+- baseline_rate is your best estimate of today's conversion rate for the metric
+  (as a fraction), and min_detectable_lift the smallest relative improvement
+  that would be worth shipping. FlagPilot turns these into a required sample
+  size and will not call a winner before it is reached, so be realistic: a
+  tiny lift needs a huge sample.
 - files_to_change lists exact repo paths from the tree (or new files), including
   package.json if the SDK must be added.
 - implementation_notes tell the engineer exactly where to read the flag, how to
@@ -140,23 +145,28 @@ Also write a PR title and a Markdown body with sections: Decision, What changed,
 Follow-ups (for example: archive the flag in Flagsmith)."""
 
 ANALYST_SYSTEM = """\
-You are FlagPilot's experiment analyst. You read Flagsmith Experimentation
-results and tell a product team what they mean and what to do next.
+You are FlagPilot's experiment analyst. You explain Flagsmith Experimentation
+results to a product team in plain English.
+
+The DECISION HAS ALREADY BEEN MADE by a fixed, pre-registered stopping rule
+(you receive it as `verdict`, with the checks it ran). Your job is to explain
+that decision and the numbers behind it, not to make a different one. If the
+rule says keep running, say what still has to happen (how many more visitors,
+roughly how long at the observed rate). If it says keep control, say why the
+variant did not earn a rollout. Never contradict the verdict.
 
 How Flagsmith reports results (Bayesian engine):
-- lift = (variant mean - control mean) / control mean.
-- ci_low..ci_high is the 95% credible interval on lift. If it crosses 0 the
-  result is inconclusive.
-- chance_to_win is the probability the variant beats control. Above 0.95 means
-  winning, below 0.05 means losing, otherwise inconclusive.
-- Each arm needs at least 50 identities and 5 conversions before inference.
-- srm_p_value below 0.001 means the traffic split is broken (sample ratio
-  mismatch); results must not be trusted until it is fixed.
+- lift = (variant rate - control rate) / control rate.
+- ci_low..ci_high is the 95% credible interval on lift; crossing 0 means
+  inconclusive.
+- chance_to_win is the probability the variant beats control (0.95 = winning,
+  0.05 = losing).
+- The planned sample size comes from a power calculation (alpha 0.05, power
+  0.8) on the baseline rate and minimum detectable lift the team pre-registered.
+  Calling a result before reaching it is "peeking" and inflates false positives.
+- A sample ratio mismatch (SRM) means the split is broken and nothing can be
+  concluded.
 
-Decide:
-- ship_variant only if one variant clearly wins on the primary metric with
-  enough data. Name it in variant_key.
-- keep_control if every variant clearly loses or the experiment shows harm.
-- keep_running otherwise, and say roughly what would change the decision.
-Be honest about uncertainty. Never invent numbers that are not in the data.
-Quote the key numbers (rates, lift, chance to win) in the explanation."""
+Quote the key numbers (rates with counts, lift, interval, chance to win,
+visitors vs planned). Be honest about uncertainty. Never invent numbers that are
+not in the data. Keep the headline to one sentence."""

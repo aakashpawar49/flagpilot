@@ -12,8 +12,8 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from .agent.agents import (
-    analyse_results,
     cleanup_experiment,
+    explain_results,
     implement_experiment,
     plan_experiment,
 )
@@ -21,8 +21,8 @@ from .agent.repo import RepoReader
 from .config import Settings
 from .flagsmith_admin import FlagsmithAdmin
 from .github_client import GitHubClient
-from .models import AgentEvent, ExperimentPlan, PullRequestRef, Run, RunStatus
-from .results import parse_results
+from .models import AgentEvent, ExperimentPlan, PullRequestRef, Run, RunStatus, now
+from .results import build_health, parse_results
 from .simulator import simulate_traffic
 from .store import RunStore
 
@@ -37,6 +37,8 @@ class Pipeline:
         self.settings = settings
         self._tasks: set[asyncio.Task[None]] = set()
         self._active: set[str] = set()  # run ids with a background step in progress
+        self._monitors: dict[str, asyncio.Task[None]] = {}
+        self._nudges: dict[str, asyncio.Event] = {}
         self._flagsmith: FlagsmithAdmin | None = None
         self._github: GitHubClient | None = None
 
@@ -62,7 +64,7 @@ class Pipeline:
         return self._github
 
     async def aclose(self) -> None:
-        for task in list(self._tasks):
+        for task in [*self._tasks, *self._monitors.values()]:
             task.cancel()
         if self._flagsmith:
             await self._flagsmith.aclose()
@@ -250,8 +252,90 @@ class Pipeline:
         await emit("approval", "Launch approved by a human.")
         await self.flagsmith.start_experiment(run.flagsmith.experiment_id)
         run.status = RunStatus.RUNNING
+        run.launched_at = now()
         await emit("success", "Experiment started. Flagsmith is now splitting traffic.")
+        await emit(
+            "info",
+            f"Stopping rule: at least {run.plan.required_per_arm:,} visitors per arm "
+            f"(baseline {run.plan.baseline_rate:.0%}, minimum detectable lift {run.plan.min_detectable_lift:+.0%}). "
+            "FlagPilot checks exposures and results every 5 minutes.",
+        )
+        self._start_monitor(run.id)
         return run
+
+    # --- 3b. monitor: health checks and results, every 5 minutes -----------------------
+
+    MONITOR_INTERVAL = 300  # Flagsmith allows one recompute per 5 minutes
+
+    def start_monitors(self) -> None:
+        for run in self.store.list():
+            if run.status in (RunStatus.RUNNING, RunStatus.SHIP_READY):
+                self._start_monitor(run.id)
+
+    def _start_monitor(self, run_id: str) -> None:
+        existing = self._monitors.get(run_id)
+        if existing and not existing.done():
+            return
+        self._nudges[run_id] = asyncio.Event()
+        self._monitors[run_id] = asyncio.create_task(self._monitor(run_id))
+
+    def nudge(self, run_id: str) -> None:
+        """Asks the monitor to check now instead of at its next 5-minute tick."""
+        if event := self._nudges.get(run_id):
+            event.set()
+
+    async def _monitor(self, run_id: str) -> None:
+        nudge = self._nudges[run_id]
+        while True:
+            try:
+                await asyncio.wait_for(nudge.wait(), timeout=self.MONITOR_INTERVAL)
+            except TimeoutError:
+                pass
+            nudge.clear()
+            for _ in range(600):  # let a running step (simulation, analysis) finish first
+                if run_id not in self._active:
+                    break
+                await asyncio.sleep(1)
+            run = self.store.get(run_id)
+            if run is None or run.status not in (RunStatus.RUNNING, RunStatus.SHIP_READY):
+                return
+            try:
+                await self._refresh_snapshot(run)
+            except Exception as exc:
+                await self._emitter(run)("error", f"Monitor: {type(exc).__name__}: {exc}")
+
+    async def _refresh_snapshot(self, run: Run) -> bool:
+        """Pulls the latest results, applies the stopping rule and health checks. No LLM."""
+        emit = self._emitter(run)
+        exp_id = run.flagsmith.experiment_id
+        assert exp_id and run.plan
+        refreshed = await self.flagsmith.refresh_results(exp_id)
+        if refreshed:
+            await asyncio.sleep(10)  # recompute is asynchronous server-side
+        raw = await self.flagsmith.get_results(exp_id)
+        snapshot = parse_results(raw, run.flagsmith.metric_id, plan=run.plan)
+        if run.results and run.results.as_of == snapshot.as_of:
+            snapshot.recommendation = run.results.recommendation  # data unchanged, keep the explanation
+        minutes = (now() - run.launched_at).total_seconds() / 60 if run.launched_at else 0
+        health = build_health(run.plan, snapshot, minutes_since_launch=minutes)
+        previous_issues = set(run.health.issues) if run.health else set()
+        for issue in health.issues:
+            if issue not in previous_issues:
+                await emit("error", f"Health check: {issue}")
+        if previous_issues and not health.issues:
+            await emit("success", "Health check: exposures and conversions look right again.")
+        run.health = health
+        run.results = snapshot
+        verdict = snapshot.verdict
+        if verdict and verdict.decision in ("ship_variant", "keep_control") and run.status == RunStatus.RUNNING:
+            run.status = RunStatus.SHIP_READY
+            await emit("approval", f"{verdict.summary} Approve the rollout decision to finish the experiment.")
+        elif verdict and verdict.decision == "keep_running" and run.status == RunStatus.SHIP_READY:
+            run.status = RunStatus.RUNNING
+        if not refreshed and not snapshot.variants and not health.issues:
+            await emit("info", "Flagsmith allows one recompute every 5 minutes; checking again at the next tick.")
+        self.store.save(run)
+        return refreshed
 
     # --- 4. simulate (demo only) -----------------------------------------------------
 
@@ -290,9 +374,8 @@ class Pipeline:
                 tag=f"{run.id}-{uuid.uuid4().hex[:4]}",
                 on_progress=progress,
             )
-            await emit(
-                "success", "Simulation finished. Flagsmith recomputes results every few minutes.", {"counts": counts}
-            )
+            await emit("success", "Simulation finished. Fetching results from Flagsmith.", {"counts": counts})
+            self.nudge(run.id)
 
         self._spawn(run, step, "simulate")
         return run
@@ -300,38 +383,21 @@ class Pipeline:
     # --- 5. analyse ------------------------------------------------------------------
 
     def analyse(self, run_id: str) -> Run:
+        """Refreshes results, applies the stopping rule, then has the model explain the verdict."""
         run = self._load(run_id, RunStatus.RUNNING, RunStatus.SHIP_READY)
-        previous = run.status
-        run.status = RunStatus.ANALYSING
-        self.store.save(run)
 
         async def step(run: Run) -> None:
             emit = self._emitter(run)
-            exp_id = run.flagsmith.experiment_id
-            assert exp_id and run.plan
-            if await self.flagsmith.refresh_results(exp_id):
-                await emit("info", "Asked Flagsmith to recompute results.")
-                await asyncio.sleep(8)
-            raw = await self.flagsmith.get_results(exp_id)
-            exposures = await self.flagsmith.get_exposures(exp_id)
-            snapshot = parse_results(raw, run.flagsmith.metric_id)
-            if not snapshot.variants:
-                run.results = snapshot
-                run.status = previous
-                await emit("info", "Flagsmith hasn't computed results yet. Try again in a few minutes.")
+            await self._refresh_snapshot(run)
+            snapshot = run.results
+            if not snapshot or not snapshot.variants or not snapshot.verdict:
+                await emit("info", "Flagsmith hasn't computed results yet. The monitor will keep checking.")
                 return
-            await emit("info", "Reading the numbers.")
-            snapshot.recommendation = await analyse_results(
-                plan=run.plan, snapshot=snapshot, exposures=exposures, emit=emit
-            )
-            run.results = snapshot
-            rec = snapshot.recommendation
-            if rec.decision == "keep_running":
-                run.status = RunStatus.RUNNING
-                await emit("info", rec.headline)
-            else:
-                run.status = RunStatus.SHIP_READY
-                await emit("approval", f"{rec.headline} Approve a rollout decision to finish the experiment.")
+            if snapshot.recommendation and snapshot.recommendation.decision == snapshot.verdict.decision:
+                return  # this exact data was already explained
+            await emit("info", f"Rule says: {snapshot.verdict.summary} Asking the model to explain the numbers.")
+            snapshot.recommendation = await explain_results(plan=run.plan, snapshot=snapshot, emit=emit)
+            await emit("info", snapshot.recommendation.headline)
 
         self._spawn(run, step, "analyse")
         return run
@@ -340,15 +406,29 @@ class Pipeline:
 
     def ship(self, run_id: str, *, winner: str, early: bool = False) -> Run:
         run = self._load(run_id, RunStatus.SHIP_READY, RunStatus.RUNNING)
-        if not (run.results and run.results.variants) and not early:
-            raise TransitionError("There are no results yet. Analyse first, or explicitly end the experiment early.")
         assert run.plan
         valid = {"control", *(v.key for v in run.plan.variants)}
         if winner not in valid:
             raise TransitionError(f"winner must be one of {sorted(valid)}")
+        verdict = run.results.verdict if run.results else None
+        decided = verdict is not None and verdict.decision in ("ship_variant", "keep_control")
+        if not decided and not early:
+            raise TransitionError(
+                "The stopping rule hasn't been met (planned sample not reached or no results). "
+                "Wait, or explicitly end the experiment early."
+            )
         run.status = RunStatus.SHIPPING
         run.ship_choice = winner
-        run.events.append(AgentEvent(kind="approval", message=f"Human approved shipping `{winner}`."))
+        if decided:
+            recommended = verdict.variant_key if verdict.decision == "ship_variant" else "control"
+            note = "" if winner == recommended else f" The rule recommended `{recommended}`; the human overrode it."
+            run.events.append(AgentEvent(kind="approval", message=f"Human approved shipping `{winner}`.{note}"))
+        else:
+            run.events.append(
+                AgentEvent(
+                    kind="approval", message=f"Human ended the experiment early and chose `{winner}` without results."
+                )
+            )
         self.store.save(run)
         self._spawn(run, self._ship, "ship")
         return run

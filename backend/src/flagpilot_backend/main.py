@@ -21,6 +21,7 @@ settings = get_settings()
 async def lifespan(app: FastAPI):
     app.state.pipeline = Pipeline(RunStore(settings.data_dir), settings)
     app.state.pipeline.recover_interrupted()
+    app.state.pipeline.start_monitors()
     yield
     await app.state.pipeline.aclose()
 

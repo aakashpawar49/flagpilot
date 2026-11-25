@@ -35,3 +35,19 @@ def test_parse_results_rows_and_inference():
 def test_parse_results_handles_not_computed():
     assert parse_results(None, 9).variants == []
     assert parse_results({"payload": None}, 9).variants == []
+
+
+def test_parse_real_flagsmith_payload():
+    """Payload captured from Flagsmith SaaS on 2026-11-24 (experiment 416)."""
+    import json
+    from pathlib import Path
+
+    raw = json.loads((Path(__file__).parent / "fixtures" / "results_416.json").read_text())
+    snap = parse_results(raw, metric_id=368)
+    assert [v.key for v in snap.variants] == ["control", "three_field"]
+    control, three = snap.variants
+    assert (control.identities, control.conversions) == (307, 38.0)
+    assert round(three.rate, 4) == round(38 / 293, 4)
+    assert round(three.lift, 3) == 0.048
+    assert round(three.chance_to_win, 2) == 0.58
+    assert snap.srm_p_value is None  # Flagsmith leaves SRM unset for experiment rollouts

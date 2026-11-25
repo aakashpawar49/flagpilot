@@ -7,13 +7,12 @@ output only after a human approves.
 """
 
 import json
-from typing import Any
 
 from pydantic import BaseModel, Field
 
 from ..config import get_settings
 from ..flagsmith_admin import FlagsmithAdmin
-from ..models import ExperimentPlan, FileChange, Recommendation, ResultsSnapshot
+from ..models import ExperimentPlan, Explanation, FileChange, Recommendation, ResultsSnapshot
 from . import prompts
 from .llm import Emit, complete_json
 from .repo import RepoReader, render_files, render_tree
@@ -139,15 +138,21 @@ async def cleanup_experiment(
     )
 
 
-async def analyse_results(
-    *, plan: ExperimentPlan, snapshot: ResultsSnapshot, exposures: Any, emit: Emit
-) -> Recommendation:
+async def explain_results(*, plan: ExperimentPlan, snapshot: ResultsSnapshot, emit: Emit) -> Recommendation:
+    """The model explains a verdict that stats.decide already made; it cannot change it."""
+    assert snapshot.verdict is not None
     data = {
-        "plan": plan.model_dump(),
+        "verdict": snapshot.verdict.model_dump(),
+        "plan": plan.model_dump(
+            include={"title", "hypothesis", "metric", "baseline_rate", "min_detectable_lift", "required_per_arm"}
+        ),
         "per_variant": [v.model_dump() for v in snapshot.variants],
+        "exposures": snapshot.exposures,
         "srm_p_value": snapshot.srm_p_value,
         "results_as_of": snapshot.as_of,
-        "exposures": exposures,
     }
-    user = "Read these experiment results and recommend what to do.\n\n" + json.dumps(data, default=str, indent=2)
-    return await complete_json(system=prompts.ANALYST_SYSTEM, user=user, output=Recommendation, emit=emit)
+    user = "Explain this experiment verdict to the team.\n\n" + json.dumps(data, default=str, indent=2)
+    explanation = await complete_json(system=prompts.ANALYST_SYSTEM, user=user, output=Explanation, emit=emit)
+    return Recommendation(
+        decision=snapshot.verdict.decision, variant_key=snapshot.verdict.variant_key, **explanation.model_dump()
+    )
