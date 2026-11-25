@@ -22,7 +22,11 @@ export function PlanEditor({ plan, editable, pending, onApprove, onReject }: {
   onReject: () => void
 }) {
   const [draft, setDraft] = useState(plan)
-  useEffect(() => setDraft(plan), [plan])
+  // The run is re-fetched every few seconds; only reset the draft when the plan itself changed,
+  // otherwise edits in progress would be wiped on every poll.
+  const planKey = JSON.stringify(plan)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => setDraft(plan), [planKey])
 
   const set = <K extends keyof ExperimentPlan>(key: K, value: ExperimentPlan[K]) => setDraft({ ...draft, [key]: value })
   const arms = [draft.control, ...draft.variants]
